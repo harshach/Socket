@@ -1,0 +1,203 @@
+//
+//  ProfileManager.swift
+//  Nook
+//
+//  Manages runtime profiles and their SwiftData persistence.
+//
+
+import Foundation
+import SwiftUI
+import SwiftData
+
+@MainActor
+final class ProfileManager: ObservableObject {
+    let context: ModelContext
+    private let userDefaults = UserDefaults.standard
+    private let profileGradientsKey = "profiles.gradients"
+    @Published var profiles: [Profile] = []
+    
+    // MARK: - Ephemeral Profiles (Incognito)
+    /// Active ephemeral profiles (one per incognito window)
+    private var ephemeralProfiles: [UUID: Profile] = [:]  // windowId -> profile
+    
+    init(context: ModelContext) {
+        self.context = context
+        loadProfiles()
+    }
+
+    // MARK: - Loading
+    func loadProfiles() {
+        do {
+            let descriptor = FetchDescriptor<ProfileEntity>(
+                sortBy: [SortDescriptor(\.index, order: .forward)]
+            )
+            let entities = try context.fetch(descriptor)
+            let persistedGradients = loadPersistedGradients()
+            self.profiles = entities.map { e in
+                let profile = Profile(id: e.id, name: e.name, icon: e.icon)
+                profile.gradient = persistedGradients[e.id] ?? .default
+                return profile
+            }
+            // Normalize indices if not sequential 0..n-1
+            let expected = Array(0..<entities.count)
+            let actual = entities.map { $0.index }
+            if actual != expected { persistProfiles() }
+        } catch {
+            print("[ProfileManager] Failed to load profiles: \(error)")
+            self.profiles = []
+        }
+    }
+
+    // MARK: - CRUD
+    @discardableResult
+    func createProfile(name: String, icon: String = "person.crop.circle") -> Profile {
+        // Next index is current count (append to end)
+        let nextIndex = profiles.count
+        let profile = Profile(name: name, icon: icon)
+        let entity = ProfileEntity(id: profile.id, name: name, icon: icon, index: nextIndex)
+        context.insert(entity)
+        do { try context.save() } catch { print("[ProfileManager] Save failed during create: \(error)") }
+        profiles.append(profile)
+        persistProfileGradients()
+        return profile
+    }
+
+    func deleteProfile(_ profile: Profile) -> Bool {
+        guard profiles.count > 1 else { return false } // prevent deleting last profile
+        // Remove from SwiftData first; if persistence fails, do not mutate runtime state
+        do {
+            let pid = profile.id
+            let predicate = #Predicate<ProfileEntity> { $0.id == pid }
+            if let entity = try context.fetch(FetchDescriptor<ProfileEntity>(predicate: predicate)).first {
+                context.delete(entity)
+            }
+            try context.save()
+        } catch {
+            print("[ProfileManager] Delete failed: \(error)")
+            return false
+        }
+        // Remove from runtime and reindex
+        if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
+            profiles.remove(at: idx)
+        }
+        persistProfiles()
+        return true
+    }
+
+    func persistProfiles() {
+        do {
+            // Fetch all existing entities
+            let all = try context.fetch(FetchDescriptor<ProfileEntity>())
+            var byId: [UUID: ProfileEntity] = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+
+            // Update or insert to match runtime profiles order
+            for (index, p) in profiles.enumerated() {
+                if let e = byId[p.id] {
+                    e.name = p.name
+                    e.icon = p.icon
+                    e.index = index
+                } else {
+                    let e = ProfileEntity(id: p.id, name: p.name, icon: p.icon, index: index)
+                    context.insert(e)
+                    byId[p.id] = e
+                }
+            }
+            // Optionally, remove entities not present in runtime array
+            let keep = Set(profiles.map { $0.id })
+            for (id, e) in byId where !keep.contains(id) { context.delete(e) }
+            try context.save()
+            persistProfileGradients()
+        } catch {
+            print("[ProfileManager] Persist failed: \(error)")
+        }
+    }
+
+    func ensureDefaultProfile() {
+        if profiles.isEmpty {
+            _ = createProfile(name: "Default", icon: "person.crop.circle")
+        }
+    }
+
+    func updateGradient(_ gradient: SpaceGradient, for profileId: UUID) {
+        guard let profile = profiles.first(where: { $0.id == profileId }) else { return }
+        profile.gradient = gradient
+        persistProfileGradients()
+    }
+
+    private func loadPersistedGradients() -> [UUID: SpaceGradient] {
+        guard let raw = userDefaults.dictionary(forKey: profileGradientsKey) as? [String: Data] else {
+            return [:]
+        }
+
+        var gradients: [UUID: SpaceGradient] = [:]
+        for (profileId, data) in raw {
+            guard let uuid = UUID(uuidString: profileId) else { continue }
+            gradients[uuid] = SpaceGradient.decode(data)
+        }
+        return gradients
+    }
+
+    private func persistProfileGradients() {
+        let gradients: [String: Data] = Dictionary(uniqueKeysWithValues: profiles.compactMap { profile -> (String, Data)? in
+            guard let encoded = profile.gradient.encoded else { return nil }
+            return (profile.id.uuidString, encoded)
+        })
+        userDefaults.set(gradients, forKey: profileGradientsKey)
+    }
+    
+    // MARK: - Ephemeral Profile Management
+    
+    /// Create a new ephemeral profile for an incognito window
+    func createEphemeralProfile(for windowId: UUID) -> Profile {
+        let profile = Profile.createEphemeral()
+        ephemeralProfiles[windowId] = profile
+        print("🔒 [ProfileManager] Created ephemeral profile for window: \(windowId)")
+        return profile
+    }
+    
+    /// Remove an ephemeral profile when incognito window closes
+    /// This destroys the data store to ensure complete privacy
+    func removeEphemeralProfile(for windowId: UUID) async {
+        guard let profile = ephemeralProfiles[windowId] else { return }
+        
+        print("🔒 [ProfileManager] Removing ephemeral profile: \(profile.id) for window: \(windowId)")
+        
+        // Remove from tracking immediately to stop tracking
+        ephemeralProfiles.removeValue(forKey: windowId)
+        
+        // Destroy the data store with timeout protection
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            var resumed = false
+            let resumeSafely: () -> Void = {
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume()
+            }
+            
+            // Timeout after 5 seconds
+            Task {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if !resumed {
+                    print("⚠️ [ProfileManager] Timeout destroying ephemeral data store for: \(profile.id)")
+                    resumeSafely()
+                }
+            }
+            
+            profile.destroyEphemeralDataStore {
+                resumeSafely()
+            }
+        }
+        
+        print("🔒 [ProfileManager] Ephemeral profile removed: \(profile.id) for window: \(windowId)")
+    }
+    
+    /// Get ephemeral profile for a window
+    func ephemeralProfile(for windowId: UUID) -> Profile? {
+        return ephemeralProfiles[windowId]
+    }
+    
+    /// Check if a profile ID is an ephemeral profile
+    func isEphemeralProfile(_ profileId: UUID) -> Bool {
+        return ephemeralProfiles.values.contains { $0.id == profileId }
+    }
+}

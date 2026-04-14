@@ -1,0 +1,168 @@
+{
+  "originHash" : "024e9cf92580ba5340e36406aec14f45a64d57882cc9409c8ce964fe2e583383",
+  "pins" : [
+    {
+      "identity" : "chronicle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Aeastr/Chronicle.git",
+      "state" : {
+        "revision" : "78f4d0d634c4834f13f7ab1bcca79c150c4c172a",
+        "version" : "3.0.2"
+      }
+    },
+    {
+      "identity" : "colorfulx",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Lakr233/ColorfulX.git",
+      "state" : {
+        "revision" : "2f008fcffc7f23811b2ba70eda77c57223815bc3",
+        "version" : "6.0.2"
+      }
+    },
+    {
+      "identity" : "colorvector",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Lakr233/ColorVector.git",
+      "state" : {
+        "revision" : "6da8726bf38d68eb943d0f2139ac2a1fac70e65b",
+        "version" : "1.0.4"
+      }
+    },
+    {
+      "identity" : "faviconfinder",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/will-lumley/FaviconFinder",
+      "state" : {
+        "revision" : "11c2b27fbdc5fdfe0bf3addac01d27c40299a819",
+        "version" : "5.1.5"
+      }
+    },
+    {
+      "identity" : "fuzi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cezheng/Fuzi",
+      "state" : {
+        "revision" : "f08c8323da21e985f3772610753bcfc652c2103f",
+        "version" : "3.1.3"
+      }
+    },
+    {
+      "identity" : "garnish",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Aeastr/Garnish",
+      "state" : {
+        "branch" : "main",
+        "revision" : "ffbd0091ed25eb3e250ca47b5ccc8c4f9a6a3420"
+      }
+    },
+    {
+      "identity" : "highlightr",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/raspu/Highlightr/",
+      "state" : {
+        "revision" : "05e7fcc63b33925cd0c1faaa205cdd5681e7bbef",
+        "version" : "2.3.0"
+      }
+    },
+    {
+      "identity" : "lrucache",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/nicklockwood/LRUCache.git",
+      "state" : {
+        "revision" : "cb5b2bd0da83ad29c0bec762d39f41c8ad0eaf3e",
+        "version" : "1.2.1"
+      }
+    },
+    {
+      "identity" : "motion",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/b3ll/Motion",
+      "state" : {
+        "branch" : "main",
+        "revision" : "c9a57f9d2b9d0a1e1b905753175e75a422d381d5"
+      }
+    },
+    {
+      "identity" : "msdisplaylink",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Lakr233/MSDisplayLink.git",
+      "state" : {
+        "revision" : "ebf5823cb5fc1326639d9a05bc06d16bbe82989f",
+        "version" : "2.0.8"
+      }
+    },
+    {
+      "identity" : "reeeed",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/nate-parrott/reeeed",
+      "state" : {
+        "revision" : "567e2f50592f8a5fe41e9ff64784b42c77f35433",
+        "version" : "1.0.1"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle",
+      "state" : {
+        "revision" : "5581748cef2bae787496fe6d61139aebe0a451f6",
+        "version" : "2.8.1"
+      }
+    },
+    {
+      "identity" : "springinterpolation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Lakr233/SpringInterpolation.git",
+      "state" : {
+        "revision" : "cdb556516daa9b43c16aae9436dd39e19ff930fd",
+        "version" : "1.4.0"
+      }
+    },
+    {
+      "identity" : "swift-atomics",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-atomics.git",
+      "state" : {
+        "revision" : "b601256eab081c0f92f059e12818ac1d4f178ff7",
+        "version" : "1.3.0"
+      }
+    },
+    {
+      "identity" : "swift-log",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-log.git",
+      "state" : {
+        "revision" : "bbd81b6725ae874c69e9b8c8804d462356b55523",
+        "version" : "1.10.1"
+      }
+    },
+    {
+      "identity" : "swift-numerics",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-numerics.git",
+      "state" : {
+        "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
+        "version" : "1.1.1"
+      }
+    },
+    {
+      "identity" : "swiftsoup",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/scinfu/SwiftSoup.git",
+      "state" : {
+        "revision" : "d86f244ed497d48012782e2f59c985a55e77b3f5",
+        "version" : "2.11.3"
+      }
+    },
+    {
+      "identity" : "universalglass",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/aeastr/universalglass.git",
+      "state" : {
+        "revision" : "9c084472801ac2c1b4c753668b275094c635b8a2",
+        "version" : "1.1.0"
+      }
+    }
+  ],
+  "version" : 3
+}
