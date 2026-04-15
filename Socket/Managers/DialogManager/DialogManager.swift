@@ -51,10 +51,7 @@ class DialogManager {
                 },
                 content: {
                     VStack(alignment: .leading, spacing: 20) {
-                        Image("socket-logo-1024")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 26, height: 26)
+                        SocketAppIcon(size: 26)
                             .shadow(
                                 color: AppColors.textPrimary.opacity(0.3),
                                 radius: 0.5,

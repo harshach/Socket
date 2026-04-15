@@ -927,36 +927,41 @@ private struct SplitControlsOverlay: View {
             // Divider bar
             ZStack {
                 // Close buttons (small, top corners)
-                HStack {
-                    Button(action: { closeSide(.left) }) {
-                        Image(systemName: "arrow.left.to.line")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(6)
-                    }
-                    .buttonStyle(.plain)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.25), lineWidth: 1))
-                    .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
-                    .padding(.leading, 8)
-                    .help("Close Left Panel")
+                VStack(spacing: 0) {
+                    HStack {
+                        Button(action: { closeSide(.left) }) {
+                            Image(systemName: "arrow.left.to.line")
+                                .font(.system(size: 10, weight: .bold))
+                                .padding(6)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
+                        .padding(.leading, 8)
+                        .help("Close Left Panel")
 
-                    Spacer()
+                        Spacer()
 
-                    Button(action: { closeSide(.right) }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(6)
+                        Button(action: { closeSide(.right) }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .padding(6)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
+                        .padding(.trailing, 8)
+                        .help("Close Split Page")
                     }
-                    .buttonStyle(.plain)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.25), lineWidth: 1))
-                    .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
-                    .padding(.trailing, 8)
-                    .help("Close Split Page")
+                    .padding(.top, 8)
+
+                    Spacer(minLength: 0)
                 }
-                .padding(.top, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
                 // Gap visuals and drag handle
                 let gap: CGFloat = 8

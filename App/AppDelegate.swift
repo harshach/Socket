@@ -46,6 +46,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private let urlEventID = AEEventID(kAEGetURL)
     private var mouseEventMonitor: Any?
     private let userDefaults = UserDefaults.standard
+    private var pendingURLs: [URL] = []
     
 
 
@@ -299,12 +300,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     /// Routes incoming external URLs to the browser manager
     private func handleIncoming(url: URL) {
+        Task { @MainActor [weak self] in
+            self?.routeIncomingURL(url)
+        }
+    }
+
+    @MainActor
+    private func routeIncomingURL(_ url: URL) {
         guard let manager = browserManager else {
+            AppDelegate.log.info("Queuing external URL until browser startup is ready: \(url.absoluteString, privacy: .public)")
+            pendingURLs.append(url)
             return
         }
+
+        let prefersExternalView = manager.socketSettings?.openExternalLinksInMiniWindow == true
+        if !prefersExternalView, windowRegistry?.allWindows.isEmpty != false {
+            AppDelegate.log.info("Queuing external URL until a browser window is registered: \(url.absoluteString, privacy: .public)")
+            pendingURLs.append(url)
+            return
+        }
+
         Task { @MainActor in
             manager.presentExternalURL(url)
         }
+    }
+
+    /// Opens any URLs that arrived before BrowserManager wiring completed.
+    func drainPendingURLs() {
+        guard !pendingURLs.isEmpty else { return }
+        let urls = pendingURLs
+        pendingURLs.removeAll()
+        urls.forEach { handleIncoming(url: $0) }
     }
 }
 

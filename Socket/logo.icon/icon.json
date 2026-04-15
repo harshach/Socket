@@ -1,6 +1,6 @@
 {
   "fill" : {
-    "automatic-gradient" : "display-p3:0.95703,0.96484,0.98828,1.00000"
+    "automatic-gradient" : "display-p3:0.97266,0.96484,0.93750,1.00000"
   },
   "groups" : [
     {
@@ -10,8 +10,8 @@
             {
               "value" : {
                 "linear-gradient" : [
-                  "display-p3:0.23145,0.50781,0.96484,1.00000",
-                  "display-p3:0.11328,0.30469,0.84766,1.00000"
+                  "display-p3:0.47266,0.92969,1.00000,1.00000",
+                  "display-p3:0.14453,0.35547,0.99609,1.00000"
                 ]
               }
             },
@@ -19,15 +19,15 @@
               "appearance" : "dark",
               "value" : {
                 "linear-gradient" : [
-                  "display-p3:0.57422,0.77344,0.99609,1.00000",
-                  "display-p3:0.36328,0.60547,0.96484,1.00000"
+                  "display-p3:0.56250,0.94922,1.00000,1.00000",
+                  "display-p3:0.29688,0.52734,1.00000,1.00000"
                 ]
               }
             },
             {
               "appearance" : "tinted",
               "value" : {
-                "solid" : "display-p3:0.36328,0.60547,0.96484,1.00000"
+                "solid" : "display-p3:0.14453,0.35547,0.99609,1.00000"
               }
             }
           ],
@@ -38,11 +38,11 @@
       ],
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 0.38
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.3
       }
     }
   ],

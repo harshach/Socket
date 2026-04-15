@@ -10,6 +10,7 @@ import SwiftUI
 enum Tabs {
     case history
     case downloads
+    case shortcuts
 }
 
 public enum SidebarPosition: String, CaseIterable, Identifiable {
@@ -49,6 +50,8 @@ struct SidebarMenu: View {
                     SidebarMenuHistoryTab()
                 case .downloads:
                     SidebarMenuDownloadsTab()
+                case .shortcuts:
+                    SidebarMenuShortcutsTab()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -64,6 +67,10 @@ struct SidebarMenu: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .openSidebarMenuDownloads)) { _ in
             selectedTab = .downloads
+            windowState.isSidebarMenuVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openSidebarMenuShortcuts)) { _ in
+            selectedTab = .shortcuts
             windowState.isSidebarMenuVisible = true
         }
     }
@@ -97,6 +104,15 @@ struct SidebarMenu: View {
                         selectedTab = .downloads
                     }
                 )
+                SidebarMenuTab(
+                    image: "keyboard",
+                    activeImage: "keyboard.fill",
+                    title: "Shortcuts",
+                    isActive: selectedTab == .shortcuts,
+                    action: {
+                        selectedTab = .shortcuts
+                    }
+                )
             }
             
             Spacer()
@@ -127,4 +143,5 @@ struct SidebarMenu: View {
 extension Notification.Name {
     static let openSidebarMenuHistory = Notification.Name("openSidebarMenuHistory")
     static let openSidebarMenuDownloads = Notification.Name("openSidebarMenuDownloads")
+    static let openSidebarMenuShortcuts = Notification.Name("openSidebarMenuShortcuts")
 }

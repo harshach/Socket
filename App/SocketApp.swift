@@ -68,7 +68,8 @@ struct SocketApp: App {
             SocketCommands(
                 browserManager: browserManager,
                 windowRegistry: windowRegistry,
-                shortcutManager: keyboardShortcutManager
+                shortcutManager: keyboardShortcutManager,
+                appDelegate: appDelegate
             )
         }
 
@@ -146,8 +147,9 @@ struct SocketApp: App {
         browserManager.keyboardShortcutManager = keyboardShortcutManager
 
         // Set up window lifecycle callbacks
-        windowRegistry.onWindowRegister = { [weak browserManager] windowState in
+        windowRegistry.onWindowRegister = { [weak browserManager, weak appDelegate] windowState in
             browserManager?.setupWindowState(windowState)
+            appDelegate?.drainPendingURLs()
         }
 
         windowRegistry.onWindowClose = {
@@ -192,6 +194,8 @@ struct SocketApp: App {
         if let activeWindow = windowRegistry.activeWindow {
             browserManager.setActiveWindowState(activeWindow)
         }
+
+        appDelegate.drainPendingURLs()
     }
 }
 

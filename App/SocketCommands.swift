@@ -13,15 +13,21 @@ struct SocketCommands: Commands {
     let browserManager: BrowserManager
     let windowRegistry: WindowRegistry
     let shortcutManager: KeyboardShortcutManager
+    let appDelegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @Environment(\.socketSettings) var socketSettings
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    init(browserManager: BrowserManager, windowRegistry: WindowRegistry, shortcutManager: KeyboardShortcutManager) {
+    init(
+        browserManager: BrowserManager,
+        windowRegistry: WindowRegistry,
+        shortcutManager: KeyboardShortcutManager,
+        appDelegate: AppDelegate
+    ) {
         self.browserManager = browserManager
         self.windowRegistry = windowRegistry
         self.shortcutManager = shortcutManager
+        self.appDelegate = appDelegate
     }
 
     // MARK: - Dynamic Keyboard Shortcuts
@@ -74,6 +80,18 @@ struct SocketCommands: Commands {
             keyEquivalent: keyEquivalent(for: action),
             modifiers: eventModifiers(for: action)
         )
+    }
+
+    private var activeBottomRailSpaceCount: Int {
+        guard let activeWindow = windowRegistry.activeWindow else {
+            return browserManager.tabManager.spaces.count
+        }
+
+        if activeWindow.isIncognito {
+            return activeWindow.ephemeralSpaces.count
+        }
+
+        return browserManager.tabManager.spaces.count
     }
 
     var body: some Commands {
@@ -208,6 +226,34 @@ struct SocketCommands: Commands {
                 browserManager.hardReloadCurrentPage()
             }
             .modifier(dynamicShortcut(.hardReload))
+            .disabled(browserManager.currentTabForActiveWindow() == nil)
+
+            Divider()
+
+            Button("Next Space") {
+                browserManager.selectNextSpaceInActiveWindow()
+            }
+            .modifier(dynamicShortcut(.nextSpace))
+            .disabled(activeBottomRailSpaceCount < 2)
+
+            Button("Previous Space") {
+                browserManager.selectPreviousSpaceInActiveWindow()
+            }
+            .modifier(dynamicShortcut(.previousSpace))
+            .disabled(activeBottomRailSpaceCount < 2)
+
+            Divider()
+
+            Button(browserManager.splitManager.isSplit(for: windowRegistry.activeWindow?.id ?? UUID()) ? "Close Split Window" : "Open Split Window") {
+                browserManager.toggleSplitMode()
+            }
+            .modifier(dynamicShortcut(.toggleSplitMode))
+            .disabled(browserManager.currentTabForActiveWindow() == nil)
+
+            Button("Send Current Page to Split") {
+                browserManager.sendCurrentPageToSplit()
+            }
+            .modifier(dynamicShortcut(.sendCurrentPageToSplit))
             .disabled(browserManager.currentTabForActiveWindow() == nil)
 
             Divider()

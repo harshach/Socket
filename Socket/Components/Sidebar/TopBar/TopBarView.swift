@@ -18,11 +18,9 @@ struct TopBarView: View {
     @EnvironmentObject var browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
     @Environment(CommandPalette.self) private var commandPalette
-    @Environment(\.socketSettings) var socketSettings
     @StateObject private var tabWrapper = ObservableTabWrapper()
     @State private var isHovering: Bool = false
     @State private var previousTabId: UUID? = nil
-    @State private var showingShieldsPopover: Bool = false
 
     var body: some View {
         let cornerRadius: CGFloat = {
@@ -53,8 +51,6 @@ struct TopBarView: View {
                     Spacer()
 
                     extensionsView
-
-                    shieldsView
 
                     sigmaToolbox
 
@@ -157,60 +153,6 @@ struct TopBarView: View {
 
     }
 
-    private var shieldsView: some View {
-        let currentTab = browserManager.currentTab(for: windowState)
-        let siteState = browserManager.trackingProtectionManager.siteProtectionState(for: currentTab)
-        let stats = siteState?.stats
-
-        return Button {
-            showingShieldsPopover.toggle()
-        } label: {
-            Image(systemName: siteState?.effectiveShieldIcon ?? "shield")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(shieldsTint(for: siteState))
-                .frame(width: 28, height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(shieldsTint(for: siteState).opacity(0.12))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(shieldsTint(for: siteState).opacity(0.20), lineWidth: 0.5)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .disabled(currentTab == nil)
-        .help(shieldsHelpText(for: siteState, stats: stats))
-        .popover(isPresented: $showingShieldsPopover, arrowEdge: .bottom) {
-            ShieldsPopoverView(
-                state: siteState,
-                tab: currentTab,
-                onToggleSite: {
-                    guard let host = siteState?.host, !host.isEmpty else { return }
-                    browserManager.trackingProtectionManager.allowDomain(
-                        host,
-                        allowed: !(siteState?.isAllowlisted ?? false)
-                    )
-                },
-                onRelaxTemporarily: {
-                    guard let currentTab else { return }
-                    browserManager.trackingProtectionManager.disableTemporarily(
-                        for: currentTab,
-                        duration: 15 * 60
-                    )
-                },
-                onRefresh: {
-                    browserManager.refreshShieldsLists()
-                },
-                onOpenSettings: {
-                    browserManager.showPrivacySettings()
-                }
-            )
-            .environmentObject(browserManager)
-        }
-    }
-
     private var sigmaToolbox: some View {
         HStack(spacing: 4) {
             toolboxButton(
@@ -245,12 +187,7 @@ struct TopBarView: View {
                 }
             }
 
-            toolboxButton(
-                systemName: "keyboard",
-                help: "Open Shortcut Cheat Sheet"
-            ) {
-                browserManager.showShortcutsSettings()
-            }
+            keyboardShortcutsButton
         }
     }
 
@@ -265,22 +202,36 @@ struct TopBarView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(navButtonColor)
-                .frame(width: 28, height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(toolboxButtonBackgroundColor(isActive: isActive))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(navButtonColor.opacity(isActive ? 0.25 : 0.12), lineWidth: 0.5)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            toolboxButtonLabel(systemName: systemName, isActive: isActive)
         }
         .buttonStyle(.plain)
         .help(help)
+    }
+
+    private func toolboxButtonLabel(systemName: String, isActive: Bool = false) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(navButtonColor)
+            .frame(width: 28, height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(toolboxButtonBackgroundColor(isActive: isActive))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(navButtonColor.opacity(isActive ? 0.25 : 0.12), lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var keyboardShortcutsButton: some View {
+        Button(action: {
+            browserManager.showShortcutsDrawer()
+        }) {
+            toolboxButtonLabel(systemName: "keyboard")
+        }
+        .buttonStyle(.plain)
+        .help("Keyboard Shortcuts")
     }
 
     private func toolboxButtonBackgroundColor(isActive: Bool) -> Color {
@@ -288,34 +239,6 @@ struct TopBarView: View {
             return navButtonColor.opacity(0.14)
         }
         return navButtonColor.opacity(0.07)
-    }
-
-    private func shieldsTint(for state: SiteProtectionState?) -> Color {
-        guard let state else { return navButtonColor.opacity(0.8) }
-        if !state.isGlobalProtectionEnabled {
-            return .secondary
-        }
-        if state.isAllowlisted || state.isTemporarilyRelaxed {
-            return .orange
-        }
-        return .green
-    }
-
-    private func shieldsHelpText(for state: SiteProtectionState?, stats: PageBlockStats?) -> String {
-        guard let state else { return "Page Shields" }
-        if !state.isGlobalProtectionEnabled {
-            return "Shields are disabled globally"
-        }
-        if state.isAllowlisted {
-            return "Shields are off for \(state.host ?? "this site")"
-        }
-        if state.isTemporarilyRelaxed {
-            return "Shields are temporarily relaxed for this tab"
-        }
-        let blockedCount = (stats?.networkRuleCount ?? 0) + (stats?.hiddenElementCount ?? 0)
-        return blockedCount > 0
-            ? "Shields active, \(blockedCount) protections applied"
-            : "Shields active"
     }
 
     private var navigationControls: some View {
@@ -374,8 +297,14 @@ struct TopBarView: View {
     }
 
     private var urlBar: some View {
-        HStack(spacing: 8) {
-            if browserManager.currentTab(for: windowState) != nil {
+        let currentTab = browserManager.currentTab(for: windowState)
+        let currentWebView = currentTab.flatMap {
+            browserManager.getWebView(for: $0.id, in: windowState.id) ?? $0.assignedWebView ?? $0.existingWebView
+        }
+
+        return HStack(spacing: 8) {
+            if currentTab != nil {
+                ShieldsURLBarButton()
                 Text(displayURL)
                     .font(.system(size: 13, weight: .medium, design: .default))
                     .foregroundStyle(urlBarTextColor)
@@ -390,6 +319,9 @@ struct TopBarView: View {
         .frame(maxWidth: .infinity)
         .padding(6)
         .background(urlBarBackgroundColor)
+        .overlay(alignment: .bottom) {
+            URLBarLoadingStrip(tab: currentTab, webView: currentWebView)
+        }
         .animation(
             shouldAnimateColorChange ? .easeInOut(duration: 0.3) : nil,
             value: urlBarBackgroundColor
@@ -402,7 +334,7 @@ struct TopBarView: View {
                 commandPalette.open()
             }
         }
-        .onHover { hovering in
+        .onHoverTracking { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
             }
@@ -719,7 +651,7 @@ struct ChatButton: View {
             )
         }
         .buttonStyle(.plain)
-        .onHover { state in
+        .onHoverTracking { state in
             isHovered = state
         }
 
@@ -731,149 +663,6 @@ struct ChatButton: View {
             return isDark ? .white.opacity(0.15) : .black.opacity(0.1)
         } else {
             return isDark ? .white.opacity(0.1) : .black.opacity(0.05)
-        }
-    }
-}
-
-private struct ShieldsPopoverView: View {
-    @EnvironmentObject private var browserManager: BrowserManager
-
-    let state: SiteProtectionState?
-    let tab: Tab?
-    let onToggleSite: () -> Void
-    let onRelaxTemporarily: () -> Void
-    let onRefresh: () -> Void
-    let onOpenSettings: () -> Void
-
-    private var hostLabel: String {
-        state?.host ?? tab?.webView?.url?.host ?? tab?.url.host ?? "Current Site"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: state?.effectiveShieldIcon ?? "shield")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(iconTint)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(iconTint.opacity(0.14))
-                    )
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Shields")
-                        .font(.headline)
-                    Text(hostLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            Text(statusText)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.primary)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                telemetryRow(
-                    title: "Network rules active",
-                    value: "\(state?.stats.networkRuleCount ?? 0)",
-                    systemImage: "bolt.horizontal.fill"
-                )
-                telemetryRow(
-                    title: "Cosmetic rules active",
-                    value: "\(state?.stats.cosmeticRuleCount ?? 0)",
-                    systemImage: "eye.slash"
-                )
-                telemetryRow(
-                    title: "Elements hidden",
-                    value: "\(state?.stats.hiddenElementCount ?? 0)",
-                    systemImage: "trash.slash"
-                )
-                telemetryRow(
-                    title: "Third-party storage",
-                    value: (state?.thirdPartyStorageRestricted ?? false) ? "Restricted" : "Relaxed",
-                    systemImage: "externaldrive.badge.icloud"
-                )
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Button(state?.isAllowlisted == true ? "Block on This Site" : "Allow on This Site") {
-                    onToggleSite()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(state?.host?.isEmpty ?? true)
-
-                Button("Temporarily Relax for Sign-In") {
-                    onRelaxTemporarily()
-                }
-                .buttonStyle(.bordered)
-                .disabled(tab == nil)
-
-                HStack(spacing: 8) {
-                    Button("Refresh Lists") {
-                        onRefresh()
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Open Privacy Settings") {
-                        onOpenSettings()
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-        }
-        .padding(16)
-        .frame(width: 320)
-    }
-
-    private var iconTint: Color {
-        guard let state else { return .secondary }
-        if !state.isGlobalProtectionEnabled {
-            return .secondary
-        }
-        if state.isAllowlisted || state.isTemporarilyRelaxed {
-            return .orange
-        }
-        return .green
-    }
-
-    private var statusText: String {
-        guard let state else { return "No active page selected." }
-        if !state.isGlobalProtectionEnabled {
-            return "Shields are disabled globally."
-        }
-        if state.isAllowlisted {
-            return "This site is allowlisted."
-        }
-        if state.isTemporarilyRelaxed {
-            return "This tab is temporarily relaxed for sign-in."
-        }
-        return "Shields are active for this site."
-    }
-
-    @ViewBuilder
-    private func telemetryRow(title: String, value: String, systemImage: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .frame(width: 14, height: 14)
-                .foregroundStyle(.secondary)
-
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Spacer(minLength: 8)
-
-            Text(value)
-                .font(.caption.weight(.semibold))
         }
     }
 }

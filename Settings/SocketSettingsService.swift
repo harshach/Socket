@@ -23,6 +23,7 @@ class SocketSettingsService {
     private let sidebarPositionKey = "settings.sidebarPosition"
     private let topBarAddressViewKey = "settings.topBarAddressView"
     private let sigmaCommandModeEnabledKey = "settings.sigmaCommandModeEnabled"
+    private let openExternalLinksInMiniWindowKey = "settings.openExternalLinksInMiniWindow"
 
     private let geminiApiKeyKey = "settings.geminiApiKey"
     private let geminiModelKey = "settings.geminiModel"
@@ -121,6 +122,15 @@ class SocketSettingsService {
     var sigmaCommandModeEnabled: Bool {
         didSet {
             userDefaults.set(sigmaCommandModeEnabled, forKey: sigmaCommandModeEnabledKey)
+        }
+    }
+
+    var openExternalLinksInMiniWindow: Bool {
+        didSet {
+            userDefaults.set(
+                openExternalLinksInMiniWindow,
+                forKey: openExternalLinksInMiniWindowKey
+            )
         }
     }
 
@@ -231,9 +241,6 @@ class SocketSettingsService {
             }
 
             userDefaults.set(TabLayout.sidebar.rawValue, forKey: tabLayoutKey)
-            if !topBarAddressView {
-                topBarAddressView = true
-            }
         }
     }
 
@@ -256,6 +263,7 @@ class SocketSettingsService {
             sidebarPositionKey: SidebarPosition.left.rawValue,
             topBarAddressViewKey: true,
             sigmaCommandModeEnabledKey: true,
+            openExternalLinksInMiniWindowKey: false,
 
             geminiApiKeyKey: "",
             geminiModelKey: GeminiModel.flash.rawValue,
@@ -297,6 +305,7 @@ class SocketSettingsService {
         self.sidebarPosition = SidebarPosition(rawValue: userDefaults.string(forKey: sidebarPositionKey) ?? "left") ?? SidebarPosition.left
         self.topBarAddressView = userDefaults.object(forKey: topBarAddressViewKey) as? Bool ?? true
         self.sigmaCommandModeEnabled = userDefaults.object(forKey: sigmaCommandModeEnabledKey) as? Bool ?? true
+        self.openExternalLinksInMiniWindow = userDefaults.object(forKey: openExternalLinksInMiniWindowKey) as? Bool ?? false
         self.geminiApiKey = userDefaults.string(forKey: geminiApiKeyKey) ?? ""
         self.geminiModel = GeminiModel(rawValue: userDefaults.string(forKey: geminiModelKey) ?? GeminiModel.flash.rawValue) ?? .flash
         self.showAIAssistant = userDefaults.bool(forKey: showAIAssistantKey)
@@ -311,7 +320,7 @@ class SocketSettingsService {
         self.webSearchContextSize = userDefaults.string(forKey: webSearchContextSizeKey) ?? "medium"
         self.showLinkStatusBar = userDefaults.bool(forKey: showLinkStatusBarKey)
         self.pinnedTabsLook = PinnedTabsConfiguration(rawValue: userDefaults.string(forKey: pinnedTabsLookKey) ?? "large") ?? .large
-        self.tabLayout = .sidebar
+        self.tabLayout = TabLayout(rawValue: userDefaults.string(forKey: tabLayoutKey) ?? TabLayout.sidebar.rawValue) ?? .sidebar
         self.didFinishOnboarding = userDefaults.bool(forKey: didFinishOnboardingKey)
 
         if let data = userDefaults.data(forKey: siteSearchEntriesKey),
@@ -320,9 +329,6 @@ class SocketSettingsService {
         } else {
             self.siteSearchEntries = SiteSearchEntry.defaultSites
         }
-
-        self.topBarAddressView = true
-        self.tabLayout = .sidebar
     }
 }
 

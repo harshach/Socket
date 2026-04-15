@@ -90,7 +90,7 @@ struct SpaceTab: View {
                         }
                     }
                     .buttonStyle(PlainButtonStyle())
-                    .onHover { hovering in
+                    .onHoverTracking { hovering in
                         isSpeakerHovering = hovering
                     }
                     .help(tab.isAudioMuted ? "Unmute Audio" : "Mute Audio")
@@ -135,7 +135,7 @@ struct SpaceTab: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(PlainButtonStyle())
-        .onHover { hovering in
+        .onHoverTracking { hovering in
             isHovering = hovering
         }
         .background(
@@ -173,7 +173,7 @@ struct SpaceTab: View {
         .opacity(isHovering ? 1 : 0)
         .allowsHitTesting(isHovering)
         .accessibilityHidden(!isHovering)
-        .onHover { hovering in
+        .onHoverTracking { hovering in
             isCloseHovering = hovering
         }
         .frame(width: 24, height: 24)

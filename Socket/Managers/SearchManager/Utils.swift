@@ -1,6 +1,48 @@
 import Foundation
 import SwiftUI
 
+private func hostPortion(_ input: String) -> String {
+  let beforePath = input.split(separator: "/", maxSplits: 1).first.map(String.init) ?? input
+  let beforeQuery = beforePath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? beforePath
+  return beforeQuery
+}
+
+private func isLocalhost(_ input: String) -> Bool {
+  let host = hostPortion(input).lowercased()
+  return host == "localhost" || host.hasPrefix("localhost:")
+}
+
+private func isIPAddress(_ host: String) -> Bool {
+  let normalizedHost = host.lowercased()
+
+  let bareHost: String = {
+    if normalizedHost.hasPrefix("["),
+       let closingBracketIndex = normalizedHost.firstIndex(of: "]")
+    {
+      return String(normalizedHost[normalizedHost.index(after: normalizedHost.startIndex)..<closingBracketIndex])
+    }
+    if let colonIndex = normalizedHost.lastIndex(of: ":"), normalizedHost[..<colonIndex].contains(".") {
+      return String(normalizedHost[..<colonIndex])
+    }
+    return normalizedHost
+  }()
+
+  if bareHost.contains("::") {
+    return true
+  }
+
+  let parts = bareHost.split(separator: ".")
+  guard parts.count == 4 else { return false }
+
+  for part in parts {
+    guard let octet = Int(part), (0...255).contains(octet) else {
+      return false
+    }
+  }
+
+  return true
+}
+
 public func isValidURL(_ string: String) -> Bool {
   let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -36,7 +78,14 @@ public func normalizeURL(_ input: String, queryTemplate: String) -> String {
     return trimmed
   }
 
+  if isLocalhost(trimmed) {
+    return "http://\(trimmed)"
+  }
+
   if trimmed.contains(".") && !trimmed.contains(" ") {
+    if isIPAddress(hostPortion(trimmed)) {
+      return "http://\(trimmed)"
+    }
     return "https://\(trimmed)"
   }
 
@@ -47,11 +96,24 @@ public func normalizeURL(_ input: String, queryTemplate: String) -> String {
 
 public func isLikelyURL(_ text: String) -> Bool {
   let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-  return trimmed.contains(".") &&
-    (trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ||
-      trimmed.contains(".com") || trimmed.contains(".org") ||
-      trimmed.contains(".net") || trimmed.contains(".io") ||
-      trimmed.contains(".co") || trimmed.contains(".dev"))
+
+  if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+    return true
+  }
+
+  if isLocalhost(trimmed) {
+    return true
+  }
+
+  guard trimmed.contains(".") else { return false }
+
+  if isIPAddress(hostPortion(trimmed)) {
+    return true
+  }
+
+  return trimmed.contains(".com") || trimmed.contains(".org") ||
+    trimmed.contains(".net") || trimmed.contains(".io") ||
+    trimmed.contains(".co") || trimmed.contains(".dev")
 }
 
 public enum SearchProvider: String, CaseIterable, Identifiable, Codable, Sendable {

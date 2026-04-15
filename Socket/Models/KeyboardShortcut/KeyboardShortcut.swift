@@ -143,21 +143,21 @@ enum ShortcutAction: String, CaseIterable, Hashable, Codable {
         case .goToLastTab: return "Go to Last Tab"
         case .duplicateTab: return "Duplicate Tab"
         case .toggleTopBarAddressView: return "Toggle Top Bar Address View"
-        case .nextSpace: return "Next Workspace"
-        case .previousSpace: return "Previous Workspace"
-        case .goToWorkspace1: return "Go to Workspace 1"
-        case .goToWorkspace2: return "Go to Workspace 2"
-        case .goToWorkspace3: return "Go to Workspace 3"
-        case .goToWorkspace4: return "Go to Workspace 4"
-        case .goToWorkspace5: return "Go to Workspace 5"
-        case .goToWorkspace6: return "Go to Workspace 6"
-        case .goToWorkspace7: return "Go to Workspace 7"
-        case .goToWorkspace8: return "Go to Workspace 8"
-        case .goToWorkspace9: return "Go to Workspace 9"
-        case .createWorkspace: return "Create Workspace"
-        case .editCurrentWorkspace: return "Edit Current Workspace"
-        case .moveWorkspaceUp: return "Move Workspace Up"
-        case .moveWorkspaceDown: return "Move Workspace Down"
+        case .nextSpace: return "Next Space"
+        case .previousSpace: return "Previous Space"
+        case .goToWorkspace1: return "Go to Space 1"
+        case .goToWorkspace2: return "Go to Space 2"
+        case .goToWorkspace3: return "Go to Space 3"
+        case .goToWorkspace4: return "Go to Space 4"
+        case .goToWorkspace5: return "Go to Space 5"
+        case .goToWorkspace6: return "Go to Space 6"
+        case .goToWorkspace7: return "Go to Space 7"
+        case .goToWorkspace8: return "Go to Space 8"
+        case .goToWorkspace9: return "Go to Space 9"
+        case .createWorkspace: return "Create Space"
+        case .editCurrentWorkspace: return "Edit Current Space"
+        case .moveWorkspaceUp: return "Move Space Up"
+        case .moveWorkspaceDown: return "Move Space Down"
         case .createPrivateWindow: return "New Private Window"
         case .newWindow: return "New Window"
         case .closeWindow: return "Close Window"
@@ -251,7 +251,7 @@ enum ShortcutCategory: String, CaseIterable, Hashable, Codable {
         switch self {
         case .navigation: return "Navigation"
         case .tabs: return "Pages"
-        case .spaces: return "Workspaces"
+        case .spaces: return "Spaces"
         case .window: return "Window"
         case .tools: return "Tools"
         }
@@ -449,6 +449,7 @@ extension KeyboardShortcut {
             KeyboardShortcut(action: .focusSplitScreen, keyCombination: KeyCombination(key: "i", modifiers: [.shift])),
             KeyboardShortcut(action: .toggleSplitScreenFocus, keyCombination: KeyCombination(key: ";", modifiers: [.command])),
             KeyboardShortcut(action: .toggleSplitMode, keyCombination: KeyCombination(key: "rightarrow", modifiers: [.command])),
+            KeyboardShortcut(action: .toggleSplitMode, keyCombination: KeyCombination(key: "\\", modifiers: [.command])),
             KeyboardShortcut(action: .sendCurrentPageToSplit, keyCombination: KeyCombination(key: "rightarrow", modifiers: [.shift])),
             KeyboardShortcut(action: .sendSplitPageToMain, keyCombination: KeyCombination(key: "leftarrow", modifiers: [.shift])),
             KeyboardShortcut(action: .closeSplitPage, keyCombination: KeyCombination(key: "d", modifiers: [.shift])),

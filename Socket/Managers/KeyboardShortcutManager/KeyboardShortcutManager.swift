@@ -15,7 +15,7 @@ class KeyboardShortcutManager {
     private let userDefaults = UserDefaults.standard
     private let shortcutsKey = "keyboard.shortcuts"
     private let shortcutsVersionKey = "keyboard.shortcuts.version"
-    private let currentVersion = 7 // Increment when adding new shortcuts
+    private let currentVersion = 8 // Increment when adding new shortcuts
 
     /// Hash-based storage for O(1) lookup: ["cmd+t": KeyboardShortcut]
     private var shortcutMap: [String: KeyboardShortcut] = [:]
@@ -583,7 +583,7 @@ class KeyboardShortcutManager {
                 let currentURL = browserManager.currentTabForActiveWindow()?.url.absoluteString ?? ""
                 self.windowRegistry?.activeWindow?.commandPalette?.openReplacingCurrentPage(prefill: currentURL)
             case .openShortcutsCheatSheet:
-                browserManager.showShortcutsSettings()
+                browserManager.showShortcutsDrawer()
             case .openDevTools:
                 browserManager.openWebInspector()
             case .viewDownloads:

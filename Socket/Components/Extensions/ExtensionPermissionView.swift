@@ -19,15 +19,11 @@ struct ExtensionPermissionView: View {
     let onDeny: () -> Void
     let extensionLogo: NSImage
 
-    
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(spacing: 8) {
                 HStack(spacing: 24) {
-                    Image("socket-logo-1024")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 64, height: 64)
+                    SocketAppIcon(size: 64)
                     Image(systemName: "arrow.left")
                         .font(.system(size: 28, weight: .medium))
                         .foregroundColor(.secondary)
@@ -36,13 +32,10 @@ struct ExtensionPermissionView: View {
                         .scaledToFit()
                         .frame(width: 64, height: 64)
                 }
-
-                
-            
             }
             Text("Add the \"\(extensionName)\"extension to Socket?")
                 .font(.system(size: 16, weight: .semibold))
-            
+
             Text("It can:")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(.secondary)
@@ -54,7 +47,7 @@ struct ExtensionPermissionView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            HStack{
+            HStack {
                 Button("Cancel") {
                     onDeny()
                 }
@@ -66,7 +59,7 @@ struct ExtensionPermissionView: View {
         }
         .padding(20)
     }
-    
+
     private func getPermissionDescription(_ permission: String) -> String {
         switch permission {
         case "storage":
@@ -102,6 +95,6 @@ struct ExtensionPermissionView: View {
         optionalHostPermissions: ["https://github.com/*"],
         onGrant: { },
         onDeny: { },
-        extensionLogo: NSImage(imageLiteralResourceName: "socket-logo-1024")
+        extensionLogo: SocketBranding.appIconImage
     )
 }

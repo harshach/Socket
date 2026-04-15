@@ -21,6 +21,14 @@ struct SettingsGeneralTab: View {
                 Toggle("Automatically update Socket", isOn: .constant(true))
                     .disabled(true)
                 Toggle("Socket's Ad Blocker", isOn: $settings.blockCrossSiteTracking)
+                Toggle(isOn: $settings.openExternalLinksInMiniWindow) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Open external links in External View")
+                        Text("Links clicked from other apps open in a lightweight external view you can move into a space. Turn this off to open them directly as tabs in the active space.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Section(header: Text("Search")) {
                     HStack {

@@ -133,42 +133,48 @@ import OSLog
         // Validate inputs before writing
         try validateInput(snapshot)
 
-        // 1) Cleanup orphans for TabEntity
+        let allTabEntities: [TabEntity]
+        let allFolderEntities: [FolderEntity]
+        let allSpaceEntities: [SpaceEntity]
         do {
-            let all = try ctx.fetch(FetchDescriptor<TabEntity>())
-            let keepIDs = Set(snapshot.tabs.map { $0.id })
-            for e in all where !keepIDs.contains(e.id) { ctx.delete(e) }
+            allTabEntities = try ctx.fetch(FetchDescriptor<TabEntity>())
+            allFolderEntities = try ctx.fetch(FetchDescriptor<FolderEntity>())
+            allSpaceEntities = try ctx.fetch(FetchDescriptor<SpaceEntity>())
         } catch {
             throw classify(error)
+        }
+
+        let tabLookup = Dictionary(uniqueKeysWithValues: allTabEntities.map { ($0.id, $0) })
+        let folderLookup = Dictionary(uniqueKeysWithValues: allFolderEntities.map { ($0.id, $0) })
+        let spaceLookup = Dictionary(uniqueKeysWithValues: allSpaceEntities.map { ($0.id, $0) })
+
+        // 1) Cleanup orphans for TabEntity
+        let keepTabIDs = Set(snapshot.tabs.map { $0.id })
+        for entity in allTabEntities where !keepTabIDs.contains(entity.id) {
+            ctx.delete(entity)
         }
 
         // 2) Upsert tabs: global pinned, space pinned, and regular
         for tab in snapshot.tabs {
-            try upsertTab(in: ctx, tab)
+            try upsertTab(in: ctx, tab, existing: tabLookup[tab.id])
         }
 
         // 3) Upsert folders and cleanup removed folders
         for folder in snapshot.folders {
-            try upsertFolder(in: ctx, folder)
+            try upsertFolder(in: ctx, folder, existing: folderLookup[folder.id])
         }
-        do {
-            let allFolders = try ctx.fetch(FetchDescriptor<FolderEntity>())
-            let keep = Set(snapshot.folders.map { $0.id })
-            for e in allFolders where !keep.contains(e.id) { ctx.delete(e) }
-        } catch {
-            throw classify(error)
+        let keepFolderIDs = Set(snapshot.folders.map { $0.id })
+        for entity in allFolderEntities where !keepFolderIDs.contains(entity.id) {
+            ctx.delete(entity)
         }
 
         // 4) Upsert spaces and cleanup removed spaces
         for space in snapshot.spaces {
-            try upsertSpace(in: ctx, space)
+            try upsertSpace(in: ctx, space, existing: spaceLookup[space.id])
         }
-        do {
-            let allSpaces = try ctx.fetch(FetchDescriptor<SpaceEntity>())
-            let keep = Set(snapshot.spaces.map { $0.id })
-            for e in allSpaces where !keep.contains(e.id) { ctx.delete(e) }
-        } catch {
-            throw classify(error)
+        let keepSpaceIDs = Set(snapshot.spaces.map { $0.id })
+        for entity in allSpaceEntities where !keepSpaceIDs.contains(entity.id) {
+            ctx.delete(entity)
         }
 
         // 4) Upsert state
@@ -204,9 +210,7 @@ import OSLog
     }
 
     // MARK: - Entity Ops
-    private func upsertTab(in ctx: ModelContext, _ t: SnapshotTab) throws {
-        let predicate = #Predicate<TabEntity> { $0.id == t.id }
-        let existing = try ctx.fetch(FetchDescriptor<TabEntity>(predicate: predicate)).first
+    private func upsertTab(in ctx: ModelContext, _ t: SnapshotTab, existing: TabEntity? = nil) throws {
         if let e = existing {
             e.urlString = t.urlString
             e.name = t.name
@@ -240,9 +244,7 @@ import OSLog
         }
     }
 
-    private func upsertFolder(in ctx: ModelContext, _ f: SnapshotFolder) throws {
-        let predicate = #Predicate<FolderEntity> { $0.id == f.id }
-        let existing = try ctx.fetch(FetchDescriptor<FolderEntity>(predicate: predicate)).first
+    private func upsertFolder(in ctx: ModelContext, _ f: SnapshotFolder, existing: FolderEntity? = nil) throws {
         if let e = existing {
             e.name = f.name
             e.icon = f.icon
@@ -264,9 +266,7 @@ import OSLog
         }
     }
 
-    private func upsertSpace(in ctx: ModelContext, _ s: SnapshotSpace) throws {
-        let predicate = #Predicate<SpaceEntity> { $0.id == s.id }
-        let existing = try ctx.fetch(FetchDescriptor<SpaceEntity>(predicate: predicate)).first
+    private func upsertSpace(in ctx: ModelContext, _ s: SnapshotSpace, existing: SpaceEntity? = nil) throws {
         if let e = existing {
             e.name = s.name
             e.icon = s.icon
@@ -304,27 +304,34 @@ import OSLog
     private func performBestEffortPersistence(_ snapshot: Snapshot) async throws {
         let ctx = ModelContext(container)
         ctx.autosaveEnabled = false
-        // Cleanup tabs
+
+        let allTabEntities: [TabEntity]
+        let allSpaceEntities: [SpaceEntity]
         do {
-            let all = try ctx.fetch(FetchDescriptor<TabEntity>())
-            let keepIDs = Set(snapshot.tabs.map { $0.id })
-            for e in all where !keepIDs.contains(e.id) { ctx.delete(e) }
+            allTabEntities = try ctx.fetch(FetchDescriptor<TabEntity>())
+            allSpaceEntities = try ctx.fetch(FetchDescriptor<SpaceEntity>())
         } catch {
             throw classify(error)
+        }
+
+        let tabLookup = Dictionary(uniqueKeysWithValues: allTabEntities.map { ($0.id, $0) })
+        let spaceLookup = Dictionary(uniqueKeysWithValues: allSpaceEntities.map { ($0.id, $0) })
+
+        // Cleanup tabs
+        let keepTabIDs = Set(snapshot.tabs.map { $0.id })
+        for entity in allTabEntities where !keepTabIDs.contains(entity.id) {
+            ctx.delete(entity)
         }
         // Upserts
         for t in snapshot.tabs {
-            do { try upsertTab(in: ctx, t) } catch { throw classify(error) }
+            do { try upsertTab(in: ctx, t, existing: tabLookup[t.id]) } catch { throw classify(error) }
         }
         for s in snapshot.spaces {
-            do { try upsertSpace(in: ctx, s) } catch { throw classify(error) }
+            do { try upsertSpace(in: ctx, s, existing: spaceLookup[s.id]) } catch { throw classify(error) }
         }
-        do {
-            let allSpaces = try ctx.fetch(FetchDescriptor<SpaceEntity>())
-            let keep = Set(snapshot.spaces.map { $0.id })
-            for e in allSpaces where !keep.contains(e.id) { ctx.delete(e) }
-        } catch {
-            throw classify(error)
+        let keepSpaceIDs = Set(snapshot.spaces.map { $0.id })
+        for entity in allSpaceEntities where !keepSpaceIDs.contains(entity.id) {
+            ctx.delete(entity)
         }
         do {
             let states = try ctx.fetch(FetchDescriptor<TabsStateEntity>())

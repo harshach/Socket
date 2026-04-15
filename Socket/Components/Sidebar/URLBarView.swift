@@ -18,12 +18,16 @@ struct URLBarView: View {
     var isSidebarHovered: Bool
 
     var body: some View {
+        let currentTab = browserManager.currentTab(for: windowState)
+        let currentWebView = currentTab.flatMap {
+            browserManager.getWebView(for: $0.id, in: windowState.id) ?? $0.assignedWebView ?? $0.existingWebView
+        }
+
         ZStack {
             HStack(spacing: 8) {
-                    if browserManager.currentTab(for: windowState) != nil {
-                        Text(
-                            displayURL
-                        )
+                    if currentTab != nil {
+                        ShieldsURLBarButton()
+                        Text(displayURL)
                         .font(.system(size: 12, weight: .medium, design: .default))
                         .foregroundStyle(textColor)
                         .lineLimit(1)
@@ -40,7 +44,7 @@ struct URLBarView: View {
                     Spacer()
                     
                     // Copy link button (show on hover when tab is selected)
-                    if isHovering, let currentTab = browserManager.currentTab(for: windowState) {
+                    if isHovering, let currentTab {
                         Button("Copy Link", systemImage: showCheckmark ? "checkmark" : "link") {
                             copyURLToClipboard(currentTab.url.absoluteString)
                         }
@@ -52,7 +56,7 @@ struct URLBarView: View {
                     }
                     
                     // PiP button (show when video content is available or PiP is active)
-                    if let currentTab = browserManager.currentTab(for: windowState),
+                    if let currentTab,
                        (currentTab.hasVideoContent || currentTab.hasPiPActive) {
                         Button(action: {
                             currentTab.requestPictureInPicture()
@@ -79,6 +83,9 @@ struct URLBarView: View {
         .background(
            backgroundColor
         )
+        .overlay(alignment: .bottom) {
+            URLBarLoadingStrip(tab: currentTab, webView: currentWebView)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         // Report the frame in the window space so we can overlay the mini palette above all content
         .background(
@@ -89,7 +96,7 @@ struct URLBarView: View {
                 )
             }
         )
-        .onHover { hovering in
+        .onHoverTracking { hovering in
             withAnimation(.easeInOut(duration: 0.1)) {
                 isHovering = hovering
             }
@@ -181,7 +188,7 @@ struct URLBarButtonStyle: ButtonStyle {
         .scaleEffect(configuration.isPressed && isEnabled ? 0.95 : 1.0)
         .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
         .animation(.easeInOut(duration: 0.15), value: isHovering)
-        .onHover { hovering in
+        .onHoverTracking { hovering in
             isHovering = hovering
         }
     }

@@ -2022,9 +2022,51 @@ class BrowserManager: ObservableObject {
         }
     }
 
-    /// Presents an external URL in a mini window popup (for URL events)
+    /// Routes an external URL either into the active browsing context or the
+    /// opt-in external view.
     func presentExternalURL(_ url: URL) {
-        externalMiniWindowManager.present(url: url)
+        if socketSettings?.openExternalLinksInMiniWindow == true {
+            externalMiniWindowManager.present(
+                url: url,
+                profile: preferredProfileForExternalURL()
+            )
+            return
+        }
+
+        guard let targetWindow = preferredWindowForExternalURL() else {
+            externalMiniWindowManager.present(
+                url: url,
+                profile: preferredProfileForExternalURL()
+            )
+            return
+        }
+
+        _ = createNewTab(in: targetWindow, url: url.absoluteString)
+        targetWindow.window?.makeKeyAndOrderFront(nil)
+        targetWindow.window?.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func preferredWindowForExternalURL() -> BrowserWindowState? {
+        if let activeWindow = windowRegistry?.activeWindow {
+            return activeWindow
+        }
+
+        if let keyWindow = NSApp.keyWindow,
+           let matchedWindow = windowRegistry?.allWindows.first(where: { $0.window === keyWindow }) {
+            return matchedWindow
+        }
+
+        return windowRegistry?.allWindows.first
+    }
+
+    private func preferredProfileForExternalURL() -> Profile? {
+        if let windowProfileId = preferredWindowForExternalURL()?.currentProfileId,
+           let profile = profileManager.profiles.first(where: { $0.id == windowProfileId }) {
+            return profile
+        }
+
+        return currentProfile ?? profileManager.profiles.first
     }
 
     // MARK: - Window State Management
@@ -2568,34 +2610,44 @@ class BrowserManager: ObservableObject {
 
     /// Select the next space in the active window
     func selectNextSpaceInActiveWindow() {
-        guard let activeWindow = windowRegistry?.activeWindow,
-            let currentSpaceId = activeWindow.currentSpaceId,
-            let currentSpaceIndex = tabManager.spaces.firstIndex(where: { $0.id == currentSpaceId })
-        else { return }
+        guard let activeWindow = windowRegistry?.activeWindow else { return }
+        let spaces = spacesForBottomRail(in: activeWindow)
+        guard !spaces.isEmpty else { return }
 
-        let nextIndex = (currentSpaceIndex + 1) % tabManager.spaces.count
-        if let nextSpace = tabManager.spaces[safe: nextIndex] {
+        let currentSpaceIndex =
+            activeWindow.currentSpaceId.flatMap { currentSpaceId in
+                spaces.firstIndex(where: { $0.id == currentSpaceId })
+            }
+            ?? 0
+
+        let nextIndex = (currentSpaceIndex + 1) % spaces.count
+        if let nextSpace = spaces[safe: nextIndex] {
             setActiveSpace(nextSpace, in: activeWindow)
         }
     }
 
     /// Select the previous space in the active window
     func selectPreviousSpaceInActiveWindow() {
-        guard let activeWindow = windowRegistry?.activeWindow,
-            let currentSpaceId = activeWindow.currentSpaceId,
-            let currentSpaceIndex = tabManager.spaces.firstIndex(where: { $0.id == currentSpaceId })
-        else { return }
+        guard let activeWindow = windowRegistry?.activeWindow else { return }
+        let spaces = spacesForBottomRail(in: activeWindow)
+        guard !spaces.isEmpty else { return }
+
+        let currentSpaceIndex =
+            activeWindow.currentSpaceId.flatMap { currentSpaceId in
+                spaces.firstIndex(where: { $0.id == currentSpaceId })
+            }
+            ?? 0
 
         let previousIndex =
-            currentSpaceIndex > 0 ? currentSpaceIndex - 1 : tabManager.spaces.count - 1
-        if let previousSpace = tabManager.spaces[safe: previousIndex] {
+            currentSpaceIndex > 0 ? currentSpaceIndex - 1 : spaces.count - 1
+        if let previousSpace = spaces[safe: previousIndex] {
             setActiveSpace(previousSpace, in: activeWindow)
         }
     }
 
     func selectSpaceByIndexInActiveWindow(_ index: Int) {
         guard let activeWindow = windowRegistry?.activeWindow else { return }
-        let spaces = spacesForDisplay(in: activeWindow)
+        let spaces = spacesForBottomRail(in: activeWindow)
         guard spaces.indices.contains(index) else { return }
         setActiveSpace(spaces[index], in: activeWindow)
     }
@@ -2628,7 +2680,7 @@ class BrowserManager: ObservableObject {
                     let resolvedIcon = icon.isEmpty ? "square.grid.2x2" : icon
 
                     _ = self.tabManager.createSpace(
-                        name: trimmedName.isEmpty ? "New Workspace" : trimmedName,
+                        name: trimmedName.isEmpty ? "New Space" : trimmedName,
                         icon: resolvedIcon,
                         gradient: resolvedGradient,
                         profileId: resolvedProfileId
@@ -2810,17 +2862,12 @@ class BrowserManager: ObservableObject {
         setInsertModeEnabled(false)
     }
 
-    private func spacesForDisplay(in windowState: BrowserWindowState) -> [Space] {
+    /// Mirrors the exact order of the bottom rail in the sidebar.
+    private func spacesForBottomRail(in windowState: BrowserWindowState) -> [Space] {
         if windowState.isIncognito {
             return windowState.ephemeralSpaces
         }
-
-        guard let profileId = windowState.currentProfileId ?? currentProfile?.id else {
-            return tabManager.spaces
-        }
-
-        let scopedSpaces = tabManager.spaces.filter { $0.profileId == profileId }
-        return scopedSpaces.isEmpty ? tabManager.spaces : scopedSpaces
+        return tabManager.spaces
     }
 
     /// Create a new window
@@ -3012,15 +3059,45 @@ class BrowserManager: ObservableObject {
     /// Show downloads (placeholder implementation)
     func showDownloads() {
         guard let activeWindow = windowRegistry?.activeWindow else { return }
-        activeWindow.isSidebarMenuVisible = true
+        presentSidebarMenu(for: activeWindow)
         NotificationCenter.default.post(name: .openSidebarMenuDownloads, object: nil)
     }
 
     /// Show history (placeholder implementation)
     func showHistory() {
         guard let activeWindow = windowRegistry?.activeWindow else { return }
-        activeWindow.isSidebarMenuVisible = true
+        presentSidebarMenu(for: activeWindow)
         NotificationCenter.default.post(name: .openSidebarMenuHistory, object: nil)
+    }
+
+    func showShortcutsDrawer() {
+        guard let activeWindow = windowRegistry?.activeWindow else { return }
+        presentSidebarMenu(for: activeWindow)
+        NotificationCenter.default.post(name: .openSidebarMenuShortcuts, object: nil)
+    }
+
+    private func presentSidebarMenu(for windowState: BrowserWindowState) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            let previousWidth = windowState.sidebarWidth > 0
+                ? windowState.sidebarWidth
+                : windowState.savedSidebarWidth
+
+            windowState.isSidebarVisible = true
+            windowState.isSidebarAIChatVisible = false
+            windowState.isSidebarMenuVisible = true
+            windowState.savedSidebarWidth = previousWidth
+
+            let expandedWidth: CGFloat = 400
+            windowState.sidebarWidth = expandedWidth
+            windowState.sidebarContentWidth = max(expandedWidth - 16, 0)
+        }
+
+        if windowRegistry?.activeWindow?.id == windowState.id {
+            isSidebarVisible = true
+            sidebarWidth = windowState.sidebarWidth
+            savedSidebarWidth = windowState.savedSidebarWidth
+            sidebarContentWidth = windowState.sidebarContentWidth
+        }
     }
 
     // MARK: - Tab Closure Undo Notification

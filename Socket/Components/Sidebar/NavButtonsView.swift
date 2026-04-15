@@ -54,12 +54,14 @@ struct NavButtonsView: View {
     var body: some View {
         let sidebarOnLeft = socketSettings.sidebarPosition == .left
         let sidebarWidthForLayout = effectiveSidebarWidth ?? windowState.sidebarWidth
+        let headerButtonStyle = NavButtonStyle(size: .small)
+        let compactButtonSpacing: CGFloat = 4
 
-        // Adjust thresholds based on whether AI button is shown
-        // When AI is disabled, we have more space, so thresholds are lower
-        let navigationCollapseThreshold: CGFloat = socketSettings.showAIAssistant ? 280 : 250
-        let refreshCollapseThreshold: CGFloat = socketSettings.showAIAssistant ? 240 : 210
-        let aiChatCollapseThreshold: CGFloat = 220
+        // Keep back/forward inline for common sidebar widths by using tighter
+        // button sizing and only collapsing when the header is genuinely constrained.
+        let navigationCollapseThreshold: CGFloat = socketSettings.showAIAssistant ? 248 : 218
+        let refreshCollapseThreshold: CGFloat = socketSettings.showAIAssistant ? 214 : 188
+        let aiChatCollapseThreshold: CGFloat = 204
 
         let shouldCollapseNavigation = sidebarWidthForLayout < navigationCollapseThreshold
         let shouldCollapseRefresh = sidebarWidthForLayout < refreshCollapseThreshold
@@ -75,7 +77,7 @@ struct NavButtonsView: View {
                 browserManager.toggleSidebar(for: windowState)
             }
             .labelStyle(.iconOnly)
-            .buttonStyle(NavButtonStyle())
+            .buttonStyle(headerButtonStyle)
             .foregroundStyle(Color.primary)
             
             if socketSettings.showAIAssistant && !shouldCollapseAIChat {
@@ -83,13 +85,13 @@ struct NavButtonsView: View {
                     browserManager.toggleAISidebar(for: windowState)
                 }
                 .labelStyle(.iconOnly)
-                .buttonStyle(NavButtonStyle())
+                .buttonStyle(headerButtonStyle)
                 .foregroundStyle(Color.primary)
             }
             
             Spacer()
             
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: compactButtonSpacing) {
                 if shouldCollapseNavigation {
                     collapsedMenu(
                         includeNavigation: true,
@@ -97,10 +99,10 @@ struct NavButtonsView: View {
                         includeAIChat: shouldCollapseAIChat && socketSettings.showAIAssistant
                     )
                 } else {
-                    HStack(alignment: .center, spacing: 8) {
+                    HStack(alignment: .center, spacing: compactButtonSpacing) {
                         Button("Go Back", systemImage: "arrow.backward", action: goBack)
                             .labelStyle(.iconOnly)
-                            .buttonStyle(NavButtonStyle())
+                            .buttonStyle(headerButtonStyle)
                             .foregroundStyle(Color.primary)
                             .disabled(!tabWrapper.canGoBack)
                             .contextMenu {
@@ -112,7 +114,7 @@ struct NavButtonsView: View {
                         
                         Button("Go Forward", systemImage: "arrow.forward", action: goForward)
                             .labelStyle(.iconOnly)
-                            .buttonStyle(NavButtonStyle())
+                            .buttonStyle(headerButtonStyle)
                             .foregroundStyle(Color.primary)
                             .disabled(!tabWrapper.canGoForward)
                             .contextMenu {
@@ -135,7 +137,7 @@ struct NavButtonsView: View {
                 if !shouldCollapseRefresh {
                     Button("Reload", systemImage: "arrow.clockwise", action: refreshCurrentTab)
                         .labelStyle(.iconOnly)
-                        .buttonStyle(NavButtonStyle())
+                        .buttonStyle(headerButtonStyle)
                         .foregroundStyle(Color.primary)
                         .foregroundStyle(Color.primary)
                 }
@@ -230,7 +232,7 @@ struct NavButtonsView: View {
                 .labelStyle(.iconOnly)
             }
             .menuStyle(.button)
-            .buttonStyle(NavButtonStyle())
+            .buttonStyle(NavButtonStyle(size: .small))
         }
     }
 }

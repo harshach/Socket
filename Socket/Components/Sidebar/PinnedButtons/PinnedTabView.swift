@@ -80,7 +80,7 @@ struct PinnedTabView: View {
             .contentShape(RoundedRectangle(cornerRadius: pinnedTabsConfiguration.cornerRadius, style: .continuous))
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
+        .onHoverTracking { hovering in
             self.isHovered = hovering
         }
     }
