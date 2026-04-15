@@ -2,9 +2,9 @@
 
 ## Our Commitment
 
-We are committed to providing a welcoming and inclusive environment for all contributors to Nook, regardless of experience level, background, or identity.
+We are committed to providing a welcoming and inclusive environment for all contributors to Socket, regardless of experience level, background, or identity.
 
-Nook is built by volunteers who contribute their time and expertise out of passion for creating great software. We appreciate everyone who takes time to contribute to making Nook better.
+Socket is built by volunteers who contribute their time and expertise out of passion for creating great software. We appreciate everyone who takes time to contribute to making Socket better.
 
 ## Expected Behavior
 
@@ -28,7 +28,7 @@ Nook is built by volunteers who contribute their time and expertise out of passi
 This Code of Conduct applies to all project spaces, including:
 - GitHub repository (issues, PRs, discussions)
 - Discord community
-- Any other official Nook communication channels
+- Any other official Socket communication channels
 
 ## Enforcement
 
@@ -51,4 +51,4 @@ This Code of Conduct is adapted from the [Contributor Covenant](https://www.cont
 
 ---
 
-By participating in the Nook community, you agree to abide by this Code of Conduct.
+By participating in the Socket community, you agree to abide by this Code of Conduct.

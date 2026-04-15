@@ -4,26 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Nook is a fast, minimal macOS browser with sidebar-first design. Built with Swift 6, SwiftUI, and WKWebView. Requires macOS 15.5+ and Xcode to build.
+Socket is a fast, minimal macOS browser with sidebar-first design. Built with Swift 6, SwiftUI, and WKWebView. Requires macOS 15.5+ and Xcode to build.
 
 ## Build & Run
 
 ```bash
-# Open in Xcode (single scheme: "Nook")
-open Nook.xcodeproj
+# Open in Xcode (single scheme: "Socket")
+open Socket.xcodeproj
 
 # Build from command line
-xcodebuild -scheme Nook -configuration Debug -arch arm64 -derivedDataPath build
+xcodebuild -scheme Socket -configuration Debug -arch arm64 -derivedDataPath build
 
 # Release build (universal)
-xcodebuild -scheme Nook -configuration Release -arch arm64 -arch x86_64 -derivedDataPath build
+xcodebuild -scheme Socket -configuration Release -arch arm64 -arch x86_64 -derivedDataPath build
 ```
 
 You must set your personal Development Team in Xcode Signing settings to build locally.
 
-**Test target**: `NookUITests` (UI tests only, run via Xcode or `xcodebuild test -scheme Nook`).
+**Test target**: `SocketUITests` (UI tests only, run via Xcode or `xcodebuild test -scheme Socket`).
 
-**No SPM**: All dependencies are embedded locally in `Nook/ThirdParty/` — no `swift package resolve` needed.
+**No SPM**: All dependencies are embedded locally in `Socket/ThirdParty/` — no `swift package resolve` needed.
 
 ## Git Workflow
 
@@ -37,7 +37,7 @@ You must set your personal Development Team in Xcode Signing settings to build l
 
 The app uses specialized **Managers** for each feature domain, coordinated through environment injection:
 
-- **BrowserManager** (`Nook/Managers/BrowserManager/`) — Current "god object" (~2800 lines) that connects all managers. Being refactored toward independent, environment-injected managers.
+- **BrowserManager** (`Socket/Managers/BrowserManager/`) — Current "god object" (~2800 lines) that connects all managers. Being refactored toward independent, environment-injected managers.
 - **TabManager** — Tab lifecycle, persistence (atomic snapshots via `PersistenceActor`), spaces, folders, pin management.
 - **ProfileManager** — Persistent profiles (each with isolated `WKWebsiteDataStore`) and ephemeral/incognito profiles using `WKWebsiteDataStore.nonPersistent()`.
 - **ExtensionManager** — `WKWebExtensionController` integration (macOS 15.4+). Singleton pattern.
@@ -54,24 +54,24 @@ The app uses specialized **Managers** for each feature domain, coordinated throu
 ### App Entry & Window Hierarchy
 
 ```
-NookApp.swift          — @main entry, creates WindowGroup scene
+SocketApp.swift          — @main entry, creates WindowGroup scene
   └─ ContentView.swift — Per-window container, registers with WindowRegistry
        └─ WindowView   — Main browser: Sidebar + WebsiteView + TopBar + StatusBar
 ```
 
-**Environment injection flow**: `NookApp` creates `BrowserManager`, `WindowRegistry`, `WebViewCoordinator`, `NookSettingsService` and injects them as `@EnvironmentObject` / `@Environment`. Each window gets its own `BrowserWindowState`.
+**Environment injection flow**: `SocketApp` creates `BrowserManager`, `WindowRegistry`, `WebViewCoordinator`, `SocketSettingsService` and injects them as `@EnvironmentObject` / `@Environment`. Each window gets its own `BrowserWindowState`.
 
 ### Top-Level Modules
 
 | Directory | Purpose |
 |-----------|---------|
-| `App/` | Entry point, AppDelegate, ContentView, window management, NookCommands |
-| `Nook/Managers/` | ~30 feature managers (business logic) |
-| `Nook/Models/` | Data models and entities |
-| `Nook/Components/` | SwiftUI view components |
-| `Nook/Protocols/` | Protocol definitions (e.g., `TabListDataSource`) |
-| `Nook/Utils/` | Utilities, WebKit extensions, Metal shaders, debug tools |
-| `Nook/ThirdParty/` | Embedded dependencies (BigUIPaging, HTSymbolHook, MuteableWKWebView, swift-atomics, swift-numerics) |
+| `App/` | Entry point, AppDelegate, ContentView, window management, SocketCommands |
+| `Socket/Managers/` | ~30 feature managers (business logic) |
+| `Socket/Models/` | Data models and entities |
+| `Socket/Components/` | SwiftUI view components |
+| `Socket/Protocols/` | Protocol definitions (e.g., `TabListDataSource`) |
+| `Socket/Utils/` | Utilities, WebKit extensions, Metal shaders, debug tools |
+| `Socket/ThirdParty/` | Embedded dependencies (BigUIPaging, HTSymbolHook, MuteableWKWebView, swift-atomics, swift-numerics) |
 | `Settings/` | Settings module |
 | `CommandPalette/` | Command palette UI |
 | `UI/` | Shared UI components |
@@ -85,14 +85,14 @@ The extension system is the most complex subsystem. All extension code requires 
 
 | File | Purpose |
 |------|---------|
-| `Nook/Managers/ExtensionManager/ExtensionManager.swift` | Core manager (~3800 lines), singleton, handles full lifecycle |
-| `Nook/Managers/ExtensionManager/ExtensionBridge.swift` | `WKWebExtensionTab` / `WKWebExtensionWindow` protocol adapters |
-| `Nook/Models/Extension/ExtensionModels.swift` | `ExtensionEntity` (SwiftData) + `InstalledExtension` runtime model |
-| `Nook/Models/BrowserConfig/BrowserConfig.swift` | Shared `WKWebViewConfiguration` factory — extension controller lives here |
-| `Nook/Components/Extensions/ExtensionActionView.swift` | Toolbar buttons, popup anchor positioning |
-| `Nook/Components/Extensions/ExtensionPermissionView.swift` | Permission grant/deny dialogs |
-| `Nook/Components/Extensions/PopupConsoleWindow.swift` | Debug console for extension popups |
-| `Nook/Utils/ExtensionUtils.swift` | Manifest validation, version checks |
+| `Socket/Managers/ExtensionManager/ExtensionManager.swift` | Core manager (~3800 lines), singleton, handles full lifecycle |
+| `Socket/Managers/ExtensionManager/ExtensionBridge.swift` | `WKWebExtensionTab` / `WKWebExtensionWindow` protocol adapters |
+| `Socket/Models/Extension/ExtensionModels.swift` | `ExtensionEntity` (SwiftData) + `InstalledExtension` runtime model |
+| `Socket/Models/BrowserConfig/BrowserConfig.swift` | Shared `WKWebViewConfiguration` factory — extension controller lives here |
+| `Socket/Components/Extensions/ExtensionActionView.swift` | Toolbar buttons, popup anchor positioning |
+| `Socket/Components/Extensions/ExtensionPermissionView.swift` | Permission grant/deny dialogs |
+| `Socket/Components/Extensions/PopupConsoleWindow.swift` | Debug console for extension popups |
+| `Socket/Utils/ExtensionUtils.swift` | Manifest validation, version checks |
 
 ### Critical: WebView Config Derivation
 
@@ -109,7 +109,7 @@ Supported formats: `.zip`, `.appex` (Safari extension bundle), `.app` (scans `Co
 3. MV3 validation — verifies `background.service_worker` exists
 4. `patchManifestForWebKit()` — patches world isolation, injects externally_connectable bridge
 5. Create temporary `WKWebExtension` to get `uniqueIdentifier`
-6. Move to `~/Library/Application Support/Nook/Extensions/{extensionId}/`
+6. Move to `~/Library/Application Support/Socket/Extensions/{extensionId}/`
 7. Grant ALL manifest permissions + host_permissions at install time (Chrome-like model)
 8. Load background service worker immediately
 9. Extract icon (128/64/48/32/16px from manifest icons), resolve `__MSG_key__` locale strings
@@ -120,7 +120,7 @@ Supported formats: `.zip`, `.appex` (Safari extension bundle), `.app` (scans `Co
 
 **Solution** (`setupExternallyConnectableBridge`): Two-layer bridge injected as content scripts:
 - **PAGE world script**: Wraps `browser.runtime.sendMessage()` and `.connect()`, relays via `window.postMessage()` to the isolated world
-- **ISOLATED world script** (`nook_bridge.js`): Receives postMessages, calls the real `browser.runtime.sendMessage()`, forwards responses back
+- **ISOLATED world script** (`socket_bridge.js`): Receives postMessages, calls the real `browser.runtime.sendMessage()`, forwards responses back
 
 `patchManifestForWebKit()` auto-injects the bridge content script entry into `manifest.json` when `externally_connectable` is present.
 
@@ -147,13 +147,13 @@ Tab.setupWebView()
 
 ### Storage Isolation
 
-- Extensions installed globally (`~/Library/Application Support/Nook/Extensions/{id}/`)
+- Extensions installed globally (`~/Library/Application Support/Socket/Extensions/{id}/`)
 - Runtime storage (`chrome.storage.*`, cookies, indexedDB) isolated per profile via separate `WKWebsiteDataStore`
 - On profile switch: `controller.configuration.defaultWebsiteDataStore` updated to profile-specific store
 
 ### Native Messaging
 
-Looks up host manifests in order: `~/Library/Application Support/Nook/NativeMessagingHosts/`, then Chrome, Chromium, Edge, Brave, Mozilla paths. Protocol: 4-byte native-endian length prefix + JSON. Supports single-shot (5s timeout) and long-lived `MessagePort` connections.
+Looks up host manifests in order: `~/Library/Application Support/Socket/NativeMessagingHosts/`, then Chrome, Chromium, Edge, Brave, Mozilla paths. Protocol: 4-byte native-endian length prefix + JSON. Supports single-shot (5s timeout) and long-lived `MessagePort` connections.
 
 ### Delegate Methods (WKWebExtensionControllerDelegate)
 

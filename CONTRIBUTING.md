@@ -1,6 +1,6 @@
-# Contributing to Nook
+# Contributing to Socket
 
-Thank you for your interest in contributing to Nook! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing to Socket! This document provides guidelines and instructions for contributing to the project.
 
 ## AI Assistance Notice
 
@@ -16,8 +16,8 @@ Please be respectful to maintainers and disclose AI assistance.
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/Nook.git
-   cd Nook
+   git clone https://github.com/yourusername/Socket.git
+   cd Socket
    ```
 
 2. **Switch to the dev branch**
@@ -27,7 +27,7 @@ Please be respectful to maintainers and disclose AI assistance.
 
 3. **Open in Xcode**
    ```bash
-   open Nook.xcodeproj
+   open Socket.xcodeproj
    ```
 
 4. **Build and run**
@@ -89,7 +89,7 @@ Please be respectful to maintainers and disclose AI assistance.
 Be descriptive and thorough. Include:
 
 - **macOS version**
-- **Nook version**
+- **Socket version**
 - **Clear steps to reproduce the issue**
 - **Expected vs actual behavior**
 - **Screenshots if applicable**
@@ -100,7 +100,7 @@ Be descriptive and thorough. Include:
 Provide detailed context. Include:
 
 - **Clear description of the feature and its use case**
-- **Explain how it fits with Nook's goals** (fast, secure, beautiful)
+- **Explain how it fits with Socket's goals** (fast, secure, beautiful)
 - **Consider implementation complexity and user impact**
 - **Check that similar functionality doesn't already exist**
 
@@ -112,4 +112,4 @@ Provide detailed context. Include:
 
 ## License
 
-By contributing to Nook, you agree that your contributions will be licensed under the GPL-3.0 License.
+By contributing to Socket, you agree that your contributions will be licensed under the GPL-3.0 License.

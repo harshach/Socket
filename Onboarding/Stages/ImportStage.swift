@@ -1,6 +1,6 @@
 //
 //  ImportStage.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 19/02/2026.
 //
@@ -28,7 +28,7 @@ struct ImportStage: View {
 
     var body: some View {
         VStack(spacing: 24){
-            Text("Transition to Nook")
+            Text("Transition to Socket")
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white)
             VStack(spacing: 12){

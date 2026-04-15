@@ -1,6 +1,6 @@
 //
 //  AppDelegate.swift
-//  Nook
+//  Socket
 //
 //  Application lifecycle delegate handling app termination, URL events, and Sparkle updates
 //
@@ -25,7 +25,12 @@ import Sparkle
 /// 5. Replies with terminate approval
 class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private static let log = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "Nook", category: "AppTermination")
+        subsystem: Bundle.main.bundleIdentifier ?? "Socket", category: "AppTermination")
+
+    /// Update channel: "stable" or "nightly"
+    static let updateChannelKey = "settings.updateChannel"
+    private static let stableFeedURL = "https://socket-browser.github.io/socket/appcast.xml"
+    private static let nightlyFeedURL = "https://socket-browser.github.io/socket/appcast-nightly.xml"
 
     // TEMPORARY: Reference to BrowserManager for coordinating browser operations
     // TODO: Replace with direct access to independent managers (TabManager, etc.)
@@ -349,5 +354,12 @@ extension AppDelegate {
         Task { @MainActor in
             browserManager?.handleUpdaterWillInstallOnQuit(item)
         }
+    }
+
+    // MARK: - Sparkle Multi-Channel Feed
+
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        let channel = UserDefaults.standard.string(forKey: Self.updateChannelKey) ?? "stable"
+        return channel == "nightly" ? Self.nightlyFeedURL : Self.stableFeedURL
     }
 }

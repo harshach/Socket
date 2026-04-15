@@ -3,13 +3,13 @@
 This repo now has two browser code paths:
 
 - repo root
-  The primary browser base is now [Nook](https://github.com/nook-browser/nook), checked into this repo root as an AppKit/SwiftUI/WebKit macOS browser with real browser surfaces already implemented: downloads, extensions, settings, profiles, split view, and a sidebar-first shell.
+  The primary browser base is now [Socket](https://github.com/socket-browser/socket), checked into this repo root as an AppKit/SwiftUI/WebKit macOS browser with real browser surfaces already implemented: downloads, extensions, settings, profiles, split view, and a sidebar-first shell.
 - `Legacy/SwiftPMShell`
   The earlier SwiftPM proof-of-concept shell is preserved only as reference material.
 
 ## Current Direction
 
-The active implementation work is happening directly on the Nook codebase in this repo root, with Sigma-style behavior layered on top of Nook’s existing browser substrate instead of rebuilding browser chrome from scratch.
+The active implementation work is happening directly on the Socket codebase in this repo root, with Sigma-style behavior layered on top of Socket’s existing browser substrate instead of rebuilding browser chrome from scratch.
 
 The app has been patched toward the Sigma design in these areas:
 
@@ -28,13 +28,13 @@ The active browser app is an Xcode project, not a SwiftPM package.
 Open the vendored project with:
 
 ```bash
-./Support/open_nook_project.sh
+./Support/open_socket_project.sh
 ```
 
 Or directly:
 
 ```bash
-open Nook.xcodeproj
+open Socket.xcodeproj
 ```
 
 ## Validation Notes
@@ -44,4 +44,4 @@ open Nook.xcodeproj
 
 ## Licensing
 
-This repo root now carries Nook’s upstream `GPL-3.0` base. If this remains the product base, distribution and derivative-work obligations need to be handled accordingly.
+This repo root now carries Socket’s upstream `GPL-3.0` base. If this remains the product base, distribution and derivative-work obligations need to be handled accordingly.

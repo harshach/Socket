@@ -1,6 +1,6 @@
 //
 //  StageIndicator.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 17/02/2026.
 //

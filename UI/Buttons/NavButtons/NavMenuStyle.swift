@@ -1,6 +1,6 @@
 //
 //  NavMenuStyle.swift
-//  Nook
+//  Socket
 //
 //  Created by Aether Aurelia on 11/10/2025.
 //

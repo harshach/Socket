@@ -1,6 +1,6 @@
 //
 //  FInalStage.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 19/02/2026.
 //

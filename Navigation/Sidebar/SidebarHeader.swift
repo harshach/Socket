@@ -1,6 +1,6 @@
 //
 //  SidebarHeader.swift
-//  Nook
+//  Socket
 //
 //  Created by Aether on 15/11/2025.
 //
@@ -11,17 +11,17 @@ import SwiftUI
 struct SidebarHeader: View {
     @EnvironmentObject var browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
-    @Environment(\.nookSettings) var nookSettings
+    @Environment(\.socketSettings) var socketSettings
     let isSidebarHovered: Bool
     @State private var sidebarWidth: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 8) {
-            if nookSettings.topBarAddressView {
+            if socketSettings.topBarAddressView {
                 windowControls
             }
 
-            if !nookSettings.topBarAddressView {
+            if !socketSettings.topBarAddressView {
                 navigationButtons
                 urlBar
             }
@@ -58,21 +58,21 @@ struct SidebarHeader: View {
 struct SidebarWindowControlsView: View {
     @EnvironmentObject var browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
-    @Environment(\.nookSettings) var nookSettings
+    @Environment(\.socketSettings) var socketSettings
 
     var body: some View {
         HStack(spacing: 8) {
             MacButtonsView()
                 .frame(width: 70)
 
-            Button("Toggle Sidebar", systemImage: nookSettings.sidebarPosition == .left ? "sidebar.left" : "sidebar.right") {
+            Button("Toggle Sidebar", systemImage: socketSettings.sidebarPosition == .left ? "sidebar.left" : "sidebar.right") {
                 browserManager.toggleSidebar(for: windowState)
             }
             .labelStyle(.iconOnly)
             .buttonStyle(NavButtonStyle())
             .foregroundStyle(Color.primary)
 
-            if nookSettings.showAIAssistant {
+            if socketSettings.showAIAssistant {
                 Button("Toggle AI Assistant", systemImage: "sparkle") {
                     browserManager.toggleAISidebar(for: windowState)
                 }

@@ -1,6 +1,6 @@
 //
 //  SpacesSideBarView.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 30/07/2025.
 //  Refactored by Aether on 15/11/2025.
@@ -15,7 +15,7 @@ struct SpacesSideBarView: View {
     @EnvironmentObject var browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
     @Environment(WindowRegistry.self) private var windowRegistry
-    @Environment(\.nookSettings) var nookSettings
+    @Environment(\.socketSettings) var socketSettings
     @Environment(CommandPalette.self) var commandPalette
 
     // Space navigation
@@ -54,7 +54,7 @@ struct SpacesSideBarView: View {
         }
     }
 
-    @ObservedObject private var dragSession = NookDragSessionManager.shared
+    @ObservedObject private var dragSession = SocketDragSessionManager.shared
 
     private var mainSidebarContent: some View {
         let effectiveProfileId = windowState.currentProfileId ?? browserManager.currentProfile?.id
@@ -101,7 +101,7 @@ struct SpacesSideBarView: View {
             SidebarUpdateNotification(downloadsMenuVisible: showDownloadsMenu)
                 .environmentObject(browserManager)
                 .environment(windowState)
-                .environment(nookSettings)
+                .environment(socketSettings)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
 
@@ -280,14 +280,14 @@ struct SpacesSideBarView: View {
             Menu {
                 ForEach(SidebarPosition.allCases) { position in
                     Toggle(isOn: Binding(
-                        get: { nookSettings.sidebarPosition == position },
-                        set: { _ in nookSettings.sidebarPosition = position }
+                        get: { socketSettings.sidebarPosition == position },
+                        set: { _ in socketSettings.sidebarPosition = position }
                     )) {
                         Label(position.displayName, systemImage: position.icon)
                     }
                 }
             } label: {
-                Label("Position", systemImage: nookSettings.sidebarPosition.icon)
+                Label("Position", systemImage: socketSettings.sidebarPosition.icon)
             }
         }
     }
@@ -461,7 +461,7 @@ struct SpacesSideBarView: View {
     // MARK: - Computed Properties
 
     private var menuTransition: AnyTransition {
-        .move(edge: nookSettings.sidebarPosition == .left ? .leading : .trailing)
+        .move(edge: socketSettings.sidebarPosition == .left ? .leading : .trailing)
             .combined(with: .opacity)
     }
 }

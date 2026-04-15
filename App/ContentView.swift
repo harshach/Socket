@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 28/07/2025.
 //  Updated by Aether Aurelia on 15/11/2025.

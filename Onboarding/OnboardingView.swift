@@ -1,6 +1,6 @@
 //
 //  OnboardingView.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 19/02/2026.
 //
@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct OnboardingView: View {
-    @Environment(\.nookSettings) var nookSettings
+    @Environment(\.socketSettings) var socketSettings
     @EnvironmentObject var browserManager: BrowserManager
 
     @State private var currentStage: Int = 0
@@ -87,12 +87,12 @@ struct OnboardingView: View {
     }
 
     private func applySettings() {
-        nookSettings.showAIAssistant = aiChatEnabled
-        nookSettings.blockCrossSiteTracking = adBlockerEnabled
-        nookSettings.currentMaterial = selectedMaterial
-        nookSettings.topBarAddressView = topBarAddressView
+        socketSettings.showAIAssistant = aiChatEnabled
+        socketSettings.blockCrossSiteTracking = adBlockerEnabled
+        socketSettings.currentMaterial = selectedMaterial
+        socketSettings.topBarAddressView = topBarAddressView
 
-        nookSettings.didFinishOnboarding = true
+        socketSettings.didFinishOnboarding = true
     }
 
     private func advance() {

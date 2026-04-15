@@ -1,6 +1,6 @@
 //
 //  CommandPalette.swift
-//  Nook
+//  Socket
 //
 //  Per-window command palette state and actions
 //

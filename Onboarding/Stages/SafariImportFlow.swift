@@ -1,6 +1,6 @@
 //
 //  SafariImportFlow.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 20/02/2026.
 //

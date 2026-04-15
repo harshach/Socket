@@ -1,6 +1,6 @@
 //
 //  SpaceContextMenu.swift
-//  Nook
+//  Socket
 //
 //  Created by Aether on 15/11/2025.
 //

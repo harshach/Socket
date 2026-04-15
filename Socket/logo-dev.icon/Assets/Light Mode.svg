@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 710 820" fill="none">
+  <defs>
+    <linearGradient id="plugGrad" x1="200" y1="100" x2="500" y2="750" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="boltGrad" x1="300" y1="250" x2="420" y2="600" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E0E7FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Main plug body -->
+  <rect x="175" y="280" width="360" height="400" rx="40" fill="url(#plugGrad)"/>
+
+  <!-- Plug top (narrower neck) -->
+  <rect x="235" y="160" width="240" height="160" rx="20" fill="url(#plugGrad)"/>
+
+  <!-- Left prong -->
+  <rect x="275" y="60" width="50" height="130" rx="25" fill="#93C5FD"/>
+
+  <!-- Right prong -->
+  <rect x="385" y="60" width="50" height="130" rx="25" fill="#93C5FD"/>
+
+  <!-- Lightning bolt (symbolizing connection/power) -->
+  <path d="M 395 340 L 330 470 L 375 470 L 325 620 L 420 450 L 370 450 L 415 340 Z" fill="url(#boltGrad)"/>
+
+  <!-- Cord at bottom -->
+  <path d="M 330 680 Q 355 760 355 820" stroke="#1E40AF" stroke-width="28" stroke-linecap="round" fill="none"/>
+</svg>

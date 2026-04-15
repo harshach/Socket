@@ -1,6 +1,6 @@
 //
 //  HelloStage.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 19/02/2026.
 //
@@ -11,10 +11,10 @@ struct HelloStage: View {
 
     var body: some View {
         VStack(spacing: 24){
-            Text("Say Hi to Nook")
+            Text("Say Hi to Socket")
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white)
-            Image("nook-logo-1024")
+            Image("socket-logo-1024")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 128 ,height: 128)

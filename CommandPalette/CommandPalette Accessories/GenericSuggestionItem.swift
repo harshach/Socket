@@ -1,6 +1,6 @@
 //
 //  GenericSuggestionItem.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 18/08/2025.
 //

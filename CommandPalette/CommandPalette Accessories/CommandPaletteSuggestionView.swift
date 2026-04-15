@@ -1,6 +1,6 @@
 //
 //  CommandPaletteSuggestionView.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 31/07/2025.
 //

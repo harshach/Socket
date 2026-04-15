@@ -1,6 +1,6 @@
 //
 //  WindowView.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 30/07/2025.
 //  Updated by Aether Aurelia on 15/11/2025.
@@ -16,7 +16,7 @@ struct WindowView: View {
     @Environment(CommandPalette.self) private var commandPalette
     @Environment(WindowRegistry.self) private var windowRegistry
     @Environment(AIService.self) private var aiService
-    @Environment(\.nookSettings) var nookSettings
+    @Environment(\.socketSettings) var socketSettings
     @StateObject private var hoverSidebarManager = HoverSidebarManager()
     @Environment(\.colorScheme) var colorScheme
     
@@ -121,7 +121,7 @@ struct WindowView: View {
         .onAppear {
             hoverSidebarManager.attach(browserManager: browserManager)
             hoverSidebarManager.windowRegistry = windowRegistry
-            hoverSidebarManager.nookSettings = nookSettings
+            hoverSidebarManager.socketSettings = socketSettings
             hoverSidebarManager.start()
         }
         .onDisappear {
@@ -162,7 +162,7 @@ struct WindowView: View {
     private func WindowBackground() -> some View {
         ZStack {
             
-            BlurEffectView(material: nookSettings.currentMaterial, state: .followsWindowActiveState)
+            BlurEffectView(material: socketSettings.currentMaterial, state: .followsWindowActiveState)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             SpaceGradientBackgroundView()
 
@@ -179,10 +179,10 @@ struct WindowView: View {
     @ViewBuilder
     private func SidebarWebViewStack() -> some View {
         let aiVisible = windowState.isSidebarAIChatVisible && !windowState.isFocusModeEnabled
-        let aiAppearsOnTrailingEdge = nookSettings.sidebarPosition == .left
+        let aiAppearsOnTrailingEdge = socketSettings.sidebarPosition == .left
         let sidebarVisible = windowState.isSidebarVisible && !windowState.isFocusModeEnabled
-        let sidebarOnRight = nookSettings.sidebarPosition == .right
-        let sidebarOnLeft = nookSettings.sidebarPosition == .left
+        let sidebarOnRight = socketSettings.sidebarPosition == .right
+        let sidebarOnLeft = socketSettings.sidebarPosition == .left
         
         HStack(spacing: 0) {
             if aiAppearsOnTrailingEdge {
@@ -210,7 +210,7 @@ struct WindowView: View {
         if windowState.isSidebarVisible {
             SpacesSideBarView()
                 .frame(width: windowState.sidebarWidth)
-                .overlay(alignment: nookSettings.sidebarPosition == .left ? .trailing : .leading) {
+                .overlay(alignment: socketSettings.sidebarPosition == .left ? .trailing : .leading) {
                     SidebarResizeView()
                         .frame(maxHeight: .infinity)
                         .environmentObject(browserManager)
@@ -235,7 +235,7 @@ struct WindowView: View {
             }
         }()
         
-        let hasTopBar = nookSettings.topBarAddressView && !windowState.isFocusModeEnabled
+        let hasTopBar = socketSettings.topBarAddressView && !windowState.isFocusModeEnabled
         
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
@@ -286,7 +286,7 @@ struct WindowView: View {
 
     @ViewBuilder
     private func AISidebar() -> some View {
-        let handleAlignment: Alignment = nookSettings.sidebarPosition == .left ? .leading : .trailing
+        let handleAlignment: Alignment = socketSettings.sidebarPosition == .left ? .leading : .trailing
         
         SidebarAIChat()
             .frame(width: windowState.aiSidebarWidth)
@@ -297,12 +297,12 @@ struct WindowView: View {
                     .environment(windowState)
             }
             .transition(
-                .move(edge: nookSettings.sidebarPosition == .left ? .trailing : .leading)
+                .move(edge: socketSettings.sidebarPosition == .left ? .trailing : .leading)
                 .combined(with: .opacity)
             )
             .environmentObject(browserManager)
             .environment(windowState)
-            .environment(nookSettings)
+            .environment(socketSettings)
     }
 
     private func websiteColumnClipShape(cornerRadius: CGFloat, hasTopBar: Bool) -> AnyShape {

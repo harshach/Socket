@@ -1,6 +1,6 @@
 //
 //  CommandPaletteView.swift
-//  Nook
+//  Socket
 //
 //  Created by Maciek Bagiński on 28/07/2025.
 //
@@ -17,7 +17,7 @@ struct CommandPaletteView: View {
     @EnvironmentObject var gradientColorManager: GradientColorManager
     @State private var searchManager = SearchManager()
     @Environment(\.colorScheme) var colorScheme
-    @Environment(\.nookSettings) var nookSettings
+    @Environment(\.socketSettings) var socketSettings
 
     @FocusState private var isSearchFocused: Bool
     @State private var text: String = ""
@@ -27,7 +27,7 @@ struct CommandPaletteView: View {
 
     private var siteSearchMatch: SiteSearchEntry? {
         guard activeSiteSearch == nil else { return nil }
-        return SiteSearchEntry.match(for: text, in: nookSettings.siteSearchEntries)
+        return SiteSearchEntry.match(for: text, in: socketSettings.siteSearchEntries)
     }
 
     private var visibleSuggestions: [SearchManager.SearchSuggestion] {
@@ -452,7 +452,7 @@ struct CommandPaletteView: View {
         case .url, .search:
             // Normalize the URL/search query first so every presentation mode uses
             // the same resolved destination.
-            let template = browserManager.nookSettings?.resolvedSearchEngineTemplate ?? SearchProvider.google.queryTemplate
+            let template = browserManager.socketSettings?.resolvedSearchEngineTemplate ?? SearchProvider.google.queryTemplate
             let resolved = normalizeURL(suggestion.text, queryTemplate: template)
             openURLInCurrentMode(resolved)
             print("Opened destination in window \(windowState.id)")
