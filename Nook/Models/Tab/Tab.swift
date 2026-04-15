@@ -46,10 +46,6 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     var oauthDidProgress: Bool = false
     /// Ensures popup OAuth completion is only relayed to the opener once.
     var didHandleOAuthCompletion: Bool = false
-    var didInstallOpenerBridge: Bool = false
-    var shouldExtractOAuthToken: Bool = false
-    var oauthCallbackReturnURL: URL?
-    var oauthRedirectReturnURL: URL?
     /// Parent-side auth callback currently being completed before returning to the original page.
     var pendingOAuthCallbackURL: URL?
     /// Parent-side destination to restore once the callback endpoint has committed session state.
@@ -2648,37 +2644,6 @@ extension Tab: WKNavigationDelegate {
             scheduleSiteOwnedOAuthBridgeIfNeeded(in: webView, currentURL: currentURL)
         }
 
-        // When the main tab loads an OAuth callback URL (redirect flow),
-        // inject the opener polyfill so the page's JS completes the auth.
-        if oauthRedirectReturnURL != nil,
-           let currentURL = webView.url,
-           isLikelyOAuthCallbackURL(currentURL) {
-            let returnPath = oauthRedirectReturnURL?.absoluteString ?? "/"
-            let escapedReturn = returnPath.replacingOccurrences(of: "'", with: "\\'")
-            webView.evaluateJavaScript("""
-                console.log('[NookAuth] Injecting opener polyfill via evaluateJavaScript');
-                if (!window.opener) {
-                    window.opener = {
-                        closed: false,
-                        postMessage: function(data, origin) {
-                            console.log('[NookAuth] postMessage captured!');
-                            try { sessionStorage.setItem('__nook_auth', JSON.stringify({data: JSON.parse(JSON.stringify(data)), origin: origin || '*'})); } catch(e) {}
-                        },
-                        focus: function() {},
-                        close: function() {},
-                        get location() { return {href: '\(escapedReturn)'}; }
-                    };
-                }
-                window.close = function() {
-                    console.log('[NookAuth] window.close -> navigating to return URL');
-                    setTimeout(function() { location.href = '\(escapedReturn)'; }, 200);
-                };
-            """) { _, error in
-                if let error {
-                    print("🔐 [Tab] Polyfill injection error: \(error)")
-                }
-            }
-        }
     }
 
     // MARK: - Loading Success
@@ -2806,7 +2771,6 @@ extension Tab: WKNavigationDelegate {
             checkOAuthCompletion(url: currentURL)
         }
 
-        // (OAuth redirect callback is handled by polyfill injected at didCommit)
 
         logAuthTrace(
             "didFinish",
@@ -2921,7 +2885,6 @@ extension Tab: WKNavigationDelegate {
             setupBoostUserScript(for: url, in: webView)
         }
 
-        // (OAuth popup flow - no interception, let it work natively)
 
         // Check for Option+click to trigger Peek for any link
         if let url = navigationAction.request.url,
@@ -3186,9 +3149,6 @@ extension Tab: WKScriptMessageHandler {
             
         case "nookShortcutDetect":
             handleShortcutDetection(message: message)
-
-        case "nookOpenerBridge":
-            handleOpenerBridgeMessage(message: message)
 
         default:
             break
@@ -4697,139 +4657,29 @@ extension Tab: WKUIDelegate {
             let popupWebView = WKWebView(frame: CGRect(x: 0, y: 0, width: 500, height: 700), configuration: configuration)
             popupWebView.isInspectable = true
 
-            let window = NSWindow(
+            let popupWindow = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
             )
-            window.center()
-            window.title = "Sign In"
-            window.contentView = popupWebView
-            window.makeKeyAndOrderFront(nil)
+            popupWindow.center()
+            popupWindow.title = "Sign In"
+            popupWindow.contentView = popupWebView
+            popupWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
 
-            // Hold reference so the window doesn't get deallocated
-            objc_setAssociatedObject(self, "oauthPopupWindow", window, .OBJC_ASSOCIATION_RETAIN)
+            // Watch for auth completion and auto-hide after delay
+            let openerHost = self.url.host?.lowercased() ?? ""
+            let observer = OAuthPopupObserver(webView: popupWebView, window: popupWindow, openerHost: openerHost)
+
+            // Hold references so they don't get deallocated
+            objc_setAssociatedObject(self, "oauthPopupWindow", popupWindow, .OBJC_ASSOCIATION_RETAIN)
+            objc_setAssociatedObject(self, "oauthPopupObserver", observer, .OBJC_ASSOCIATION_RETAIN)
 
             return popupWebView
         }
 
-        // Disabled: redirect-to-main-tab approach
-        if false,
-           isLikelyOAuthPopup,
-           let url2 = navigationAction.request.url {
-            logAuthTrace("popup-redirect-to-main-tab", currentURL: url)
-            oauthRedirectReturnURL = self.url
-
-            let controller = webView.configuration.userContentController
-
-            // Inject opener polyfill + window.close override. The callback
-            // page's JS needs window.opener to complete the auth exchange.
-            // Captured postMessage data is replayed after we navigate back.
-            let polyfill = WKUserScript(source: """
-                console.log('[NookAuth] POLYFILL RUNNING on ' + location.href.substring(0, 60));
-                (function() {
-                    if (window.__nookRedirectOAuth) return;
-                    window.__nookRedirectOAuth = true;
-                    window.__nookCapturedAuth = null;
-                    if (!window.opener) {
-                        window.opener = {
-                            closed: false,
-                            postMessage: function(data, origin) {
-                                console.log('[NookAuth] postMessage captured!', JSON.stringify(data).substring(0, 200));
-                                window.__nookCapturedAuth = {data: JSON.parse(JSON.stringify(data)), origin: origin || '*'};
-                                try { sessionStorage.setItem('__nook_auth', JSON.stringify(window.__nookCapturedAuth)); } catch(e) {}
-                            },
-                            focus: function() {},
-                            close: function() {},
-                            get location() { return {href: document.referrer || '/'}; }
-                        };
-                    }
-                    window.close = function() {
-                        // Read the temp cookie and exchange it with Figma's API
-                        // to create a real session, then navigate to dashboard.
-                        setTimeout(async function() {
-                            try {
-                                var match = document.cookie.match(/__Host-google_sso_temp=([^;]+)/);
-                                if (match) {
-                                    var tokenData = JSON.parse(decodeURIComponent(match[1]));
-                                    console.log('[NookAuth] Exchanging token, length: ' + tokenData.token.length);
-                                    // Try Figma's API endpoint
-                                    var resp = await fetch('/api/session/login/google', {
-                                        method: 'POST',
-                                        headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
-                                        credentials: 'include',
-                                        body: JSON.stringify({google_access_token: tokenData.token, google_name: tokenData.name})
-                                    });
-                                    console.log('[NookAuth] /api/session/login/google: ' + resp.status);
-                                    if (resp.ok) { location.href = '/files/recents'; return; }
-
-                                    // Try alternate endpoints
-                                    var endpoints = ['/api/session/create', '/api/user/google_login', '/api/session/google_sso'];
-                                    for (var ep of endpoints) {
-                                        try {
-                                            var r = await fetch(ep, {
-                                                method: 'POST',
-                                                headers: {'Content-Type': 'application/json'},
-                                                credentials: 'include',
-                                                body: JSON.stringify({access_token: tokenData.token, name: tokenData.name, google_access_token: tokenData.token})
-                                            });
-                                            console.log('[NookAuth] ' + ep + ': ' + r.status + ' ' + (await r.text()).substring(0, 100));
-                                            if (r.ok) { location.href = '/files/recents'; return; }
-                                        } catch(e) {}
-                                    }
-                                }
-                            } catch(e) { console.log('[NookAuth] Exchange error: ' + e); }
-                            // Fallback: navigate to login page
-                            location.href = '/login';
-                        }, 500);
-                    };
-                })();
-            """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-
-            // Replay script: if __Host-google_sso_temp cookie exists,
-            // read the token and post it to all iframes to trigger login.
-            let replay = WKUserScript(source: """
-                (function() {
-                    try {
-                        var match = document.cookie.match(/__Host-google_sso_temp=([^;]+)/);
-                        console.log('[NookAuth] Cookie check: ' + (match ? 'FOUND' : 'not found'));
-                        if (!match) return;
-                        var decoded = decodeURIComponent(match[1]);
-                        var tokenData = JSON.parse(decoded);
-                        console.log('[NookAuth] Token found, length: ' + (tokenData.token || '').length);
-                        // Wait for login iframe to load and initialize
-                        setTimeout(function() {
-                            // Post the token data to all iframes and the main window
-                            var msg = {type: 'GOOGLE_SSO_COMPLETE', token: tokenData.token, name: tokenData.name};
-                            window.postMessage(msg, '*');
-                            console.log('[NookAuth] Posted to window');
-                            document.querySelectorAll('iframe').forEach(function(f) {
-                                try {
-                                    f.contentWindow.postMessage(msg, '*');
-                                    console.log('[NookAuth] Posted to iframe: ' + f.src.substring(0, 60));
-                                } catch(e) {}
-                            });
-                            // Also try the format Figma might expect
-                            var msg2 = {google_sso: true, access_token: tokenData.token, name: tokenData.name};
-                            window.postMessage(msg2, '*');
-                            document.querySelectorAll('iframe').forEach(function(f) {
-                                try { f.contentWindow.postMessage(msg2, '*'); } catch(e) {}
-                            });
-                            // Clean up the temp cookie after attempting
-                            document.cookie = '__Host-google_sso_temp=;path=/;secure;max-age=0';
-                        }, 2500);
-                    } catch(e) { console.log('[NookAuth] Replay error: ' + e); }
-                })();
-            """, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-
-            controller.addUserScript(polyfill)
-            controller.addUserScript(replay)
-
-            webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
-            return nil
-        }
 
         // Site-created popup windows must never be redirected to a custom
         // miniwindow when the page expects a real `window.open` result.
@@ -5002,657 +4852,39 @@ extension Tab: WKUIDelegate {
         userContentController.add(tab, name: "NookIdentity")
     }
     
-    /// Returns true when the popup is navigating from an auth provider back to
-    /// the opener's domain with an OAuth callback (code, token, etc.). This is
-    /// the moment to intercept and hand the URL to the parent.
-    private func isOAuthCallbackRedirectToParent(_ url: URL) -> Bool {
-        guard let callbackHost = url.host?.lowercased(),
-              let completionPattern = oauthCompletionURLPattern?.lowercased(),
-              callbackHost == completionPattern || callbackHost.hasSuffix(".\(completionPattern)") else {
-            return false
-        }
 
-        // The callback must be coming from the auth provider, not from the
-        // opener's own domain. Use the tracked provider host rather than
-        // existingWebView?.url because WKWebView.url updates optimistically
-        // during server redirect chains and may already reflect the callback
-        // URL by the time decidePolicyForNavigationAction fires.
-        guard let providerHost = oauthProviderHost?.lowercased(),
-              !providerHost.isEmpty,
-              providerHost != callbackHost else {
-            return false
-        }
+    /// Observes the popup webview's URL. When it navigates back to the
+    /// opener's domain (callback complete), hides the window and closes
+    /// after a delay to avoid the macOS 26 layer tree crash.
+    /// Watches popup URL via KVO. When the popup navigates back to the
+    /// opener's domain and finishes loading, hides the window.
+    private class OAuthPopupObserver: NSObject {
+        private var urlObservation: NSKeyValueObservation?
+        private var loadObservation: NSKeyValueObservation?
+        private weak var window: NSWindow?
+        private var callbackDetected = false
+        private var didHide = false
 
-        let urlString = url.absoluteString.lowercased()
-        let authIndicators = [
-            "code=", "access_token=", "id_token=", "oauth_token=",
-            "oauth_verifier=", "session_state=", "samlresponse="
-        ]
-        return authIndicators.contains { urlString.contains($0) }
-    }
-
-    /// Injects a window.opener polyfill into the popup so the OAuth callback
-    /// page's JavaScript can complete the auth exchange. The polyfill provides
-    /// a fake `window.opener` with `postMessage` that bridges to the parent
-    /// tab via WKScriptMessageHandler.
-    private func injectOpenerPolyfillForCallback() {
-        guard let webView = existingWebView,
-              let parentTabId = oauthParentTabId,
-              let bm = browserManager,
-              let parentTab = bm.tabManager.allTabs().first(where: { $0.id == parentTabId }) else {
-            return
-        }
-
-        let parentURL = parentTab.url
-        let parentOrigin: String = {
-            guard let scheme = parentURL.scheme, let host = parentURL.host else {
-                return parentURL.absoluteString
-            }
-            if let port = parentURL.port {
-                return "\(scheme)://\(host):\(port)"
-            }
-            return "\(scheme)://\(host)"
-        }()
-        let parentHref = parentURL.absoluteString
-
-        // Register the bridge message handler once. WKUserContentController
-        // throws if we add a duplicate, so guard with a flag.
-        let controller = webView.configuration.userContentController
-        if !didInstallOpenerBridge {
-            didInstallOpenerBridge = true
-            controller.add(self, name: "nookOpenerBridge")
-        }
-
-        // Inject at document-start so it's available before the page's JS runs.
-        // Also override window.close() to prevent WebKit's internal close
-        // handler from firing (which crashes in RemoteLayerTreePropertyApplier).
-        // Instead, we handle the close on the native side with proper timing.
-        let polyfill = WKUserScript(source: """
-            (function() {
-                if (window.opener) return; // already has a real opener
-                const _parentOrigin = \(Self.jsStringLiteral(parentOrigin));
-                const _parentHref = \(Self.jsStringLiteral(parentHref));
-                window.opener = {
-                    closed: false,
-                    postMessage: function(data, targetOrigin) {
-                        try {
-                            window.webkit.messageHandlers.nookOpenerBridge.postMessage({
-                                type: 'postMessage',
-                                data: JSON.parse(JSON.stringify(data)),
-                                targetOrigin: targetOrigin
-                            });
-                        } catch(e) {}
-                    },
-                    get location() {
-                        return { href: _parentHref, origin: _parentOrigin };
-                    },
-                    focus: function() {},
-                    close: function() {}
-                };
-                // Override window.close() to route through native bridge
-                // instead of WebKit's internal handler which crashes.
-                window.close = function() {
-                    try {
-                        window.webkit.messageHandlers.nookOpenerBridge.postMessage({
-                            type: 'windowClose'
-                        });
-                    } catch(e) {}
-                };
-            })();
-            """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-
-        controller.addUserScript(polyfill)
-
-        logAuthTrace(
-            "oauth-opener-polyfill-injected",
-            currentURL: existingWebView?.url,
-            extra: "parentOrigin=\(parentOrigin) parentTab=\(String(parentTabId.uuidString.prefix(8)))"
-        )
-    }
-
-    /// Handles messages from the window.opener polyfill injected into OAuth
-    /// popup callback pages. Relays postMessage calls to the parent tab,
-    /// and handles window.close() requests.
-    private func handleOpenerBridgeMessage(message: WKScriptMessage) {
-        guard let dict = message.body as? [String: Any],
-              let type = dict["type"] as? String else {
-            return
-        }
-
-        if type == "windowClose" {
-            logAuthTrace("oauth-bridge-window-close", currentURL: existingWebView?.url)
-            // Give the cookie bridge time to finish, then close the popup
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self else { return }
-                self.handlePopupWindowClosed()
-                self.browserManager?.popupWindowManager.closePopup(for: self.id)
-            }
-            return
-        }
-
-        guard type == "postMessage",
-              let data = dict["data"],
-              let parentTabId = oauthParentTabId,
-              let bm = browserManager,
-              let parentTab = bm.tabManager.allTabs().first(where: { $0.id == parentTabId }),
-              let parentWebView = parentTab.existingWebView else {
-            return
-        }
-
-        logAuthTrace(
-            "oauth-opener-bridge-relay",
-            currentURL: existingWebView?.url,
-            extra: "parentTab=\(String(parentTabId.uuidString.prefix(8)))"
-        )
-
-        // Relay the message to the parent tab's webview as a window.postMessage
-        let targetOrigin = dict["targetOrigin"] as? String ?? "*"
-        if let jsonData = try? JSONSerialization.data(withJSONObject: data),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            let js = "window.postMessage(\(jsonString), '\(targetOrigin.replacingOccurrences(of: "'", with: "\\'"))');"
-            parentWebView.evaluateJavaScript(js) { _, error in
-                if let error {
-                    print("🔐 [Tab] opener bridge relay error: \(error)")
-                }
-            }
-        }
-    }
-
-    /// Loads the OAuth callback URL in a hidden WKWebView to extract the auth
-    /// token, then sets the session cookie on the parent tab's page where the
-    /// polling loop is active.
-    private func loadCallbackInBackgroundAndSetCookie(
-        callbackURL: URL,
-        parentTab: Tab,
-        browserManager: BrowserManager
-    ) {
-        // Create a hidden webview with the same data store as the parent
-        let config = WKWebViewConfiguration()
-        if let parentConfig = parentTab.existingWebView?.configuration {
-            config.websiteDataStore = parentConfig.websiteDataStore
-            config.processPool = parentConfig.processPool
-        }
-
-        // Add a message handler for the opener bridge on the hidden webview
-        let bridgeHandler = HiddenOpenerBridgeHandler(parentTab: parentTab)
-        config.userContentController.add(bridgeHandler, name: "nookHiddenOpenerBridge")
-
-        // Inject opener polyfill so the callback page's JS completes the
-        // auth flow (sets cookies, calls postMessage to parent).
-        let parentOrigin: String = {
-            guard let scheme = parentTab.url.scheme, let host = parentTab.url.host else {
-                return parentTab.url.absoluteString
-            }
-            return "\(scheme)://\(host)"
-        }()
-        let polyfillScript = WKUserScript(source: """
-            (function() {
-                if (window.opener) return;
-                window.opener = {
-                    closed: false,
-                    postMessage: function(data, targetOrigin) {
-                        try {
-                            window.webkit.messageHandlers.nookHiddenOpenerBridge.postMessage({
-                                type: 'postMessage',
-                                data: JSON.parse(JSON.stringify(data)),
-                                targetOrigin: targetOrigin || '*'
-                            });
-                        } catch(e) { console.error('bridge error', e); }
-                    },
-                    get location() { return { href: '\(parentOrigin)/', origin: '\(parentOrigin)' }; },
-                    focus: function() {},
-                    close: function() {}
-                };
-                window.close = function() {
-                    try {
-                        window.webkit.messageHandlers.nookHiddenOpenerBridge.postMessage({type: 'windowClose'});
-                    } catch(e) {}
-                };
-            })();
-            """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        config.userContentController.addUserScript(polyfillScript)
-
-        let hiddenWebView = WKWebView(frame: .zero, configuration: config)
-
-        logAuthTrace(
-            "oauth-background-callback-start",
-            currentURL: callbackURL,
-            extra: "parentTab=\(String(parentTab.id.uuidString.prefix(8)))"
-        )
-
-        // Hold a strong reference to prevent dealloc
-        objc_setAssociatedObject(self, "hiddenOAuthWebView", hiddenWebView, .OBJC_ASSOCIATION_RETAIN)
-
-        // Hold the bridge handler reference
-        objc_setAssociatedObject(self, "hiddenOAuthBridge", bridgeHandler, .OBJC_ASSOCIATION_RETAIN)
-
-        // Monitor the hidden webview load to verify polyfill and diagnose issues
-        let loadObserver = HiddenWebViewLoadObserver(webView: hiddenWebView) { [weak self, weak hiddenWebView] in
-            guard let self, let hiddenWebView else { return }
-            // Check immediately
-            let checkJS = """
-            (function() {
-                var hasOpener = window.opener ? 1 : 0;
-                var opts = window.INITIAL_OPTIONS || self.INITIAL_OPTIONS || {};
-                var token = (typeof opts.google_sso_access_token === 'string') ? opts.google_sso_access_token : '';
-                return {hasOpener: hasOpener, tokenLength: token.length, keys: Object.keys(opts).slice(0,10).join(','), title: document.title, url: location.href.substring(0, 80)};
-            })();
-            """
-            hiddenWebView.evaluateJavaScript(checkJS) { result, error in
-                print("🔐 [HiddenBridge] Page loaded - check: \(result ?? "nil") error: \(error?.localizedDescription ?? "none")")
-                Tab.writeAuthDiagnostic("[AuthTrace] oauth-hidden-webview-loaded result=\(result ?? "nil")")
-            }
-            // Also check after 2s for async JS
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak hiddenWebView] in
-                hiddenWebView?.evaluateJavaScript(checkJS) { result, _ in
-                    print("🔐 [HiddenBridge] Page +2s check: \(result ?? "nil")")
-                    Tab.writeAuthDiagnostic("[AuthTrace] oauth-hidden-webview-2s result=\(result ?? "nil")")
-                }
-            }
-        }
-        objc_setAssociatedObject(self, "hiddenOAuthObserver", loadObserver, .OBJC_ASSOCIATION_RETAIN)
-
-        hiddenWebView.load(URLRequest(url: callbackURL))
-        print("🔐 [HiddenBridge] Loading URL: \(callbackURL.absoluteString.prefix(100))")
-        print("🔐 [HiddenBridge] WebView: \(hiddenWebView), isLoading: \(hiddenWebView.isLoading)")
-        // Fallback: check after 5s regardless of observer
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak hiddenWebView] in
-            guard let wv = hiddenWebView else {
-                print("🔐 [HiddenBridge] 5s check: webview deallocated!")
-                return
-            }
-            print("🔐 [HiddenBridge] 5s check: isLoading=\(wv.isLoading) url=\(wv.url?.absoluteString.prefix(80) ?? "nil") title=\(wv.title ?? "nil")")
-            wv.evaluateJavaScript("({hasOpener: window.opener?1:0, title: document.title, url: location.href.substring(0,80)})") { result, error in
-                print("🔐 [HiddenBridge] 5s JS: \(result ?? "nil") err: \(error?.localizedDescription ?? "none")")
-            }
-        }
-    }
-
-    /// Handles postMessage relay from the hidden OAuth background webview to
-    /// the parent tab. When the callback page calls window.opener.postMessage(),
-    /// this captures the data and dispatches it as a real postMessage on the
-    /// parent tab's webview, which the parent's login iframe is listening for.
-    private class HiddenOpenerBridgeHandler: NSObject, WKScriptMessageHandler {
-        weak var parentTab: Tab?
-
-        init(parentTab: Tab) {
-            self.parentTab = parentTab
+        init(webView: WKWebView, window: NSWindow, openerHost: String) {
+            self.window = window
             super.init()
-        }
-
-        func userContentController(
-            _ userContentController: WKUserContentController,
-            didReceive message: WKScriptMessage
-        ) {
-            guard let dict = message.body as? [String: Any],
-                  let type = dict["type"] as? String else { return }
-
-            if type == "postMessage",
-               let data = dict["data"],
-               let parentWebView = parentTab?.existingWebView {
-                let targetOrigin = dict["targetOrigin"] as? String ?? "*"
-
-                print("🔐 [HiddenBridge] Relaying postMessage to parent: \(type)")
-                Tab.writeAuthDiagnostic(
-                    "[AuthTrace] oauth-hidden-bridge-relay data=\(data) targetOrigin=\(targetOrigin)"
-                )
-
-                // Relay as a real window.postMessage on the parent
-                if let jsonData = try? JSONSerialization.data(withJSONObject: data),
-                   let jsonString = String(data: jsonData, encoding: .utf8) {
-                    let escapedOrigin = targetOrigin.replacingOccurrences(of: "'", with: "\\'")
-                    let js = "window.postMessage(\(jsonString), '\(escapedOrigin)');"
-                    parentWebView.evaluateJavaScript(js) { _, error in
-                        if let error {
-                            print("🔐 [HiddenBridge] postMessage relay error: \(error)")
-                        } else {
-                            print("🔐 [HiddenBridge] postMessage relayed successfully")
-                        }
-                    }
-                }
-            } else if type == "windowClose" {
-                print("🔐 [HiddenBridge] Popup page called window.close()")
-                // Cleanup will happen via the 10s timer in hidePopup
-            }
-        }
-    }
-
-    /// Simple KVO observer for WKWebView loading state.
-    private class HiddenWebViewLoadObserver: NSObject {
-        private var observation: NSKeyValueObservation?
-        private var didFinish = false
-
-        init(webView: WKWebView, onFinish: @escaping () -> Void) {
-            super.init()
-            observation = webView.observe(\.isLoading, options: [.new]) { [weak self] wv, _ in
-                guard let self, !self.didFinish, !wv.isLoading else { return }
-                self.didFinish = true
-                self.observation?.invalidate()
-                onFinish()
-            }
-        }
-    }
-
-    /// Extract token from INITIAL_OPTIONS on the callback page and set the
-    /// __Host-google_sso_temp cookie. Setting it from the callback page itself
-    /// (same origin, HTTPS) ensures __Host- prefix requirements are met.
-    private func extractOAuthTokenAndSetCookie(in webView: WKWebView) {
-        let returnURL = oauthCallbackReturnURL
-        oauthCallbackReturnURL = nil
-
-        // Wait for the page's JS to run (set cookies, etc), then go back
-        // to the original page which has the active auth polling context.
-        // Using goBack() preserves the JS state of the original page.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self, weak webView] in
-            guard let self, let webView else { return }
-
-            // First, let the callback page's JS set any cookies it needs
-            let script = """
-            (function() {
-                try {
-                    var opts = window.INITIAL_OPTIONS || self.INITIAL_OPTIONS || {};
-                    var token = (typeof opts.google_sso_access_token === 'string') ? opts.google_sso_access_token : '';
-                    var name = (typeof opts.google_sso_name === 'string') ? opts.google_sso_name : '';
-                    if (token.length > 0) {
-                        var val = encodeURIComponent(JSON.stringify({name: name, token: token}));
-                        document.cookie = '__Host-google_sso_temp=' + val + ';path=/;secure';
-                    }
-                    return {tokenLength: token.length, cookieSet: document.cookie.includes('__Host-google_sso_temp')};
-                } catch(e) { return {error: String(e)}; }
-            })();
-            """
-
-            webView.evaluateJavaScript(script) { [weak self, weak webView] result, _ in
-                guard let self else { return }
-                self.logAuthTrace(
-                    "oauth-token-extraction",
-                    currentURL: webView?.url,
-                    extra: "result=\(String(describing: result))"
-                )
-
-                // Go BACK to the original page - this preserves the JS
-                // polling context that's waiting for the cookie.
-                if webView?.canGoBack == true {
-                    webView?.goBack()
-                } else if let returnURL {
-                    self.loadURLFresh(returnURL)
-                }
-            }
-        }
-    }
-
-    /// Minimal WKUIDelegate for OAuth popups - handles window.close().
-    private class OAuthPopupDelegate: NSObject, WKUIDelegate {
-        weak var window: NSWindow?
-
-        func webViewDidClose(_ webView: WKWebView) {
-            // Hide immediately, close after WebKit settles
-            window?.orderOut(nil)
-            let w = window
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                w?.close()
-            }
-        }
-    }
-
-    /// Detects OAuth callback URLs generically (code=, access_token=, etc.)
-    private func isLikelyOAuthCallbackURL(_ url: URL) -> Bool {
-        let s = url.absoluteString.lowercased()
-        let indicators = ["code=", "access_token=", "id_token=", "oauth_token=",
-                          "oauth_verifier=", "session_state=", "samlresponse="]
-        return indicators.contains { s.contains($0) }
-    }
-
-    private static func jsStringLiteral(_ s: String) -> String {
-        let escaped = s
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-        return "'\(escaped)'"
-    }
-
-    /// Intercepts an OAuth callback that would have loaded in the popup and
-    /// routes it to the parent tab instead, ensuring the single-use auth code
-    /// is consumed by the parent's browsing context.
-    private func interceptOAuthCallbackForParent(callbackURL: URL) {
-        didHandleOAuthCompletion = true
-
-        logAuthTrace(
-            "oauth-callback-intercepted",
-            currentURL: callbackURL,
-            extra: "action=redirect-to-parent parentTab=\(oauthParentTabId.map { String($0.uuidString.prefix(8)) } ?? "nil")"
-        )
-
-        guard let bm = browserManager,
-              let parentTabId = oauthParentTabId,
-              let parentTab = bm.tabManager.allTabs().first(where: { $0.id == parentTabId }) else {
-            return
-        }
-
-        // Resolve where the parent should go after the callback page sets
-        // cookies. This is typically the page the user was on (e.g. figma.com).
-        let returnURL = oauthReturnURL ?? parentTab.url
-
-        // Defer to next run-loop turn so WebKit finishes processing the
-        // cancelled navigation.
-        DispatchQueue.main.async { [weak bm, weak parentTab, tabId = self.id] in
-            guard let bm, let parentTab else { return }
-
-            // Just hide the popup - don't close it. The cross-origin layer
-            // tree is what crashes, and we've already cancelled that
-            // navigation. The popup stays at accounts.google.com (safe).
-            bm.popupWindowManager.hidePopup(for: tabId)
-
-            // Completely disable tracking protection on the parent tab so
-            // the callback page's API calls aren't blocked by content rules.
-            bm.trackingProtectionManager.disableTemporarily(for: parentTab, duration: 120, reload: false)
-
-            // Also strip ALL content rule lists from the parent webview
-            // directly - disableTemporarily may not remove rules that were
-            // already compiled into the webview's configuration.
-            if let parentWebView = parentTab.existingWebView {
-                parentWebView.configuration.userContentController.removeAllContentRuleLists()
-            }
-
-            let returnURLString = returnURL.absoluteString
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-
-            // Inject opener polyfill that CAPTURES postMessage data and
-            // replays it on the original page after navigating back.
-            // This is the generic mechanism that works for any OAuth flow.
-            if let parentWebView = parentTab.existingWebView {
-                let polyfill = WKUserScript(source: """
-                    (function() {
-                        if (window.__nookOAuthPolyfill) return;
-                        window.__nookOAuthPolyfill = true;
-                        if (!window.opener) {
-                            // Store captured postMessage calls
-                            window.__nookCapturedMessages = [];
-                            window.opener = {
-                                closed: false,
-                                postMessage: function(data, targetOrigin) {
-                                    window.__nookCapturedMessages.push({
-                                        data: JSON.parse(JSON.stringify(data)),
-                                        origin: targetOrigin || '*'
-                                    });
-                                },
-                                focus: function() {},
-                                close: function() {},
-                                get location() { return { href: '\(returnURLString)' }; }
-                            };
-                        }
-                        // Override window.close to navigate back to the
-                        // original page and replay captured messages
-                        window.close = function() {
-                            var msgs = window.__nookCapturedMessages || [];
-                            var returnURL = '\(returnURLString)';
-                            if (msgs.length > 0) {
-                                // Store messages for replay after navigation
-                                try {
-                                    sessionStorage.setItem('__nook_oauth_messages', JSON.stringify(msgs));
-                                    sessionStorage.setItem('__nook_oauth_return', returnURL);
-                                } catch(e) {}
-                            }
-                            window.location.href = returnURL;
-                        };
-                    })();
-                    """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-
-                // Also inject a replay script that runs on EVERY page load.
-                // When the return page loads, it checks sessionStorage for
-                // captured messages and replays them.
-                let replayScript = WKUserScript(source: """
-                    (function() {
-                        try {
-                            var raw = sessionStorage.getItem('__nook_oauth_messages');
-                            if (!raw) return;
-                            sessionStorage.removeItem('__nook_oauth_messages');
-                            sessionStorage.removeItem('__nook_oauth_return');
-                            var msgs = JSON.parse(raw);
-                            // Replay each captured postMessage after a short delay
-                            // to let the page's event listeners initialize
-                            setTimeout(function() {
-                                msgs.forEach(function(msg) {
-                                    window.postMessage(msg.data, msg.origin);
-                                });
-                            }, 500);
-                        } catch(e) {}
-                    })();
-                    """, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
-
-                parentWebView.configuration.userContentController.addUserScript(polyfill)
-                parentWebView.configuration.userContentController.addUserScript(replayScript)
-            }
-
-            // DON'T navigate the parent. Fetch the callback URL natively
-            // to get the token, then set the cookie on the parent's live
-            // page where the polling loop is still active.
-            bm.tabManager.setActiveTab(parentTab)
-            self.fetchCallbackAndSetCookie(
-                callbackURL: callbackURL,
-                parentTab: parentTab,
-                cookieStore: parentTab.existingWebView?.configuration.websiteDataStore.httpCookieStore
-            )
-        }
-    }
-
-    /// Fetches the OAuth callback URL using URLSession (no navigation),
-    /// extracts the auth token from the HTML response, and sets the cookie
-    /// on the parent tab via evaluateJavaScript. Generic - works for any site.
-    private func fetchCallbackAndSetCookie(
-        callbackURL: URL,
-        parentTab: Tab,
-        cookieStore: WKHTTPCookieStore?
-    ) {
-        // Copy cookies from WKWebsiteDataStore to URLSession so the server
-        // sees the same session as the webview.
-        guard let cookieStore else { return }
-
-        cookieStore.getAllCookies { [weak parentTab] cookies in
-            let jar = HTTPCookieStorage.shared
-            for cookie in cookies {
-                jar.setCookie(cookie)
-            }
-
-            var request = URLRequest(url: callbackURL)
-            request.httpShouldHandleCookies = true
-
-            let task = URLSession.shared.dataTask(with: request) { [weak parentTab] data, response, error in
-                guard let data, let html = String(data: data, encoding: .utf8),
-                      let parentTab else {
-                    print("🔐 [Tab] Callback fetch failed: \(error?.localizedDescription ?? "no data")")
-                    return
-                }
-
-                // Extract google_sso_access_token from INITIAL_OPTIONS in HTML
-                // Generic: look for patterns like "access_token":"..." or
-                // google_sso_access_token":"..."
-                var token = ""
-                var name = ""
-
-                // Try google_sso_access_token (Figma pattern)
-                if let range = html.range(of: "google_sso_access_token\":\"") {
-                    let start = range.upperBound
-                    if let end = html[start...].firstIndex(of: "\"") {
-                        token = String(html[start..<end])
-                    }
-                }
-                if let range = html.range(of: "google_sso_name\":\"") {
-                    let start = range.upperBound
-                    if let end = html[start...].firstIndex(of: "\"") {
-                        name = String(html[start..<end])
-                    }
-                }
-
-                // Generic: try access_token pattern
-                if token.isEmpty, let range = html.range(of: "access_token\":\"") {
-                    let start = range.upperBound
-                    if let end = html[start...].firstIndex(of: "\"") {
-                        token = String(html[start..<end])
-                    }
-                }
-
-                Tab.writeAuthDiagnostic(
-                    "[AuthTrace] oauth-native-fetch tokenLength=\(token.count) nameLength=\(name.count) htmlLength=\(html.count) status=\((response as? HTTPURLResponse)?.statusCode ?? -1)"
-                )
-
-                guard !token.isEmpty else {
-                    print("🔐 [Tab] No token found in callback HTML")
-                    return
-                }
-
-                DispatchQueue.main.async { [weak parentTab] in
-                    guard let parentWebView = parentTab?.existingWebView else { return }
-
-                    // Set cookie via JS on the parent's live page
-                    let escapedName = name.replacingOccurrences(of: "'", with: "\\'")
-                    let escapedToken = token.replacingOccurrences(of: "'", with: "\\'")
-                    let js = """
-                    (function() {
-                        var val = encodeURIComponent(JSON.stringify({name: '\(escapedName)', token: '\(escapedToken)'}));
-                        document.cookie = '__Host-google_sso_temp=' + val + ';path=/;secure';
-                        return document.cookie.includes('__Host-google_sso_temp');
-                    })();
-                    """
-                    parentWebView.evaluateJavaScript(js) { [weak self, weak parentWebView] result, _ in
-                        print("🔐 [Tab] Cookie set on live parent page: \(result ?? "nil")")
-                        Tab.writeAuthDiagnostic(
-                            "[AuthTrace] oauth-cookie-set-live cookieSet=\(result ?? "nil")"
-                        )
-
-                        // The polling loop likely already stopped (COOP made
-                        // the popup appear closed before the cookie was set).
-                        // Reload the login iframe to re-trigger cookie detection.
-                        parentWebView?.evaluateJavaScript("""
-                            (function() {
-                                // Reload all login-related iframes
-                                var reloaded = 0;
-                                document.querySelectorAll('iframe').forEach(function(f) {
-                                    try {
-                                        if (f.src && (f.src.includes('login') || f.src.includes('auth'))) {
-                                            f.contentWindow.location.reload();
-                                            reloaded++;
-                                        }
-                                    } catch(e) {}
-                                });
-                                return reloaded;
-                            })();
-                        """) { result, _ in
-                            print("🔐 [Tab] Reloaded login iframes: \(result ?? "0")")
-                        }
-
-                        // Also close the popup
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                            guard let self else { return }
-                            self.browserManager?.popupWindowManager.closePopup(for: self.id)
-                        }
+            urlObservation = webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
+                guard let self, !self.callbackDetected,
+                      let host = wv.url?.host?.lowercased(),
+                      host == openerHost || host.hasSuffix(".\(openerHost)") else { return }
+                self.callbackDetected = true
+                self.urlObservation?.invalidate()
+                self.loadObservation = wv.observe(\.isLoading, options: [.new]) { [weak self] wv, _ in
+                    guard let self, !self.didHide, !wv.isLoading else { return }
+                    self.didHide = true
+                    self.loadObservation?.invalidate()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                        self?.window?.orderOut(nil)
                     }
                 }
             }
-            task.resume()
         }
+        deinit { urlObservation?.invalidate(); loadObservation?.invalidate() }
     }
 
     /// Checks if a URL indicates OAuth completion and handles the flow

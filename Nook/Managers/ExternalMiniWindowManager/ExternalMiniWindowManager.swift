@@ -212,16 +212,6 @@ final class PopupWindowManager {
         sessions[tabId] = nil
         session.controller.close()
     }
-
-    func hidePopup(for tabId: UUID) {
-        guard let session = sessions[tabId] else { return }
-        session.controller.window?.orderOut(nil)
-        // Clean up after a delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
-            self?.sessions[tabId] = nil
-        }
-    }
-
     private func preferredSize(from windowFeatures: WKWindowFeatures) -> NSSize {
         let defaultWidth: CGFloat = 520
         let defaultHeight: CGFloat = 720
