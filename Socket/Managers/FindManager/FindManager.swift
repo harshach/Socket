@@ -34,6 +34,19 @@ class FindManager: ObservableObject {
         }
 
         isFindBarVisible = false
+        if let browserManager = currentTab?.browserManager,
+           let activeWindow = browserManager.windowRegistry?.activeWindow,
+           let tab = browserManager.currentTab(for: activeWindow),
+           let webView = browserManager.getWebView(for: tab.id, in: activeWindow.id) {
+            DispatchQueue.main.async {
+                activeWindow.window?.makeFirstResponder(webView)
+            }
+        } else {
+            DispatchQueue.main.async {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+            }
+        }
+
         // Delay clearing text until animation completes (0.25s)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.searchText = ""

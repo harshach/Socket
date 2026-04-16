@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SpaceTitle: View {
     @EnvironmentObject var browserManager: BrowserManager
+    @Environment(BrowserWindowState.self) private var windowState
     @Environment(\.colorScheme) var colorScheme
 
     let space: Space
@@ -128,9 +129,15 @@ struct SpaceTitle: View {
             isHovering = hovering
         }
         .onChange(of: nameFieldFocused) { _, focused in
+            windowState.isSidebarInlineEditing = isRenaming || focused
             // When losing focus during rename, commit
             if isRenaming && !focused {
                 commitRename()
+            }
+        }
+        .onDisappear {
+            if windowState.isSidebarInlineEditing {
+                windowState.isSidebarInlineEditing = false
             }
         }
         // Provide a right-click context menu
@@ -234,12 +241,14 @@ struct SpaceTitle: View {
     private func startRenaming() {
         draftName = space.name
         isRenaming = true
+        windowState.isSidebarInlineEditing = true
     }
 
     private func cancelRename() {
         isRenaming = false
         draftName = space.name
         nameFieldFocused = false
+        windowState.isSidebarInlineEditing = false
     }
 
     private func commitRename() {
@@ -256,6 +265,7 @@ struct SpaceTitle: View {
         }
         isRenaming = false
         nameFieldFocused = false
+        windowState.isSidebarInlineEditing = false
     }
 
     private func deleteSpace() {

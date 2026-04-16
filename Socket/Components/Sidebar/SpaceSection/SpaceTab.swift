@@ -149,6 +149,17 @@ struct SpaceTab: View {
                 }
             }
         )
+        .onChange(of: tab.isRenaming) { _, isRenaming in
+            windowState.isSidebarInlineEditing = isRenaming || isTextFieldFocused
+        }
+        .onChange(of: isTextFieldFocused) { _, focused in
+            windowState.isSidebarInlineEditing = tab.isRenaming || focused
+        }
+        .onDisappear {
+            if windowState.isSidebarInlineEditing {
+                windowState.isSidebarInlineEditing = false
+            }
+        }
         .contextMenu {
             Options()
         }

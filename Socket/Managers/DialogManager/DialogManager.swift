@@ -77,12 +77,14 @@ class DialogManager {
                             DialogButton(
                                 text: "Cancel",
                                 variant: .secondary,
+                                keyboardShortcut: .escape,
                                 action: closeDialog
                             ),
                             DialogButton(
                                 text: "Quit",
                                 iconName: "return",
                                 variant: .primary,
+                                keyboardShortcut: .return,
                                 action: onQuit
                             ),
                         ]

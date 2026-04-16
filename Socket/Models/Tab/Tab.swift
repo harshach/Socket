@@ -182,6 +182,9 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // Restored navigation state from undo/session restoration (applied when web view is created)
     var restoredCanGoBack: Bool?
     var restoredCanGoForward: Bool?
+    private var persistedNavigationHistory: [String] = []
+    private var persistedNavigationIndex: Int = 0
+    private var pendingPersistedNavigationIndex: Int?
 
     // MARK: - Video State
     @Published var hasPlayingVideo: Bool = false
@@ -354,6 +357,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         self.browserManager = browserManager
         self._existingWebView = existingWebView
         super.init()
+        seedPersistedNavigationHistoryIfNeeded(with: url)
 
         Task { @MainActor in
             await fetchAndSetFavicon(for: url)
@@ -376,6 +380,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         self.index = index
         self.browserManager = nil
         super.init()
+        seedPersistedNavigationHistoryIfNeeded(with: url)
 
         Task { @MainActor in
             await fetchAndSetFavicon(for: url)
@@ -385,12 +390,28 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // MARK: - Controls
     func goBack() {
         guard canGoBack else { return }
-        _webView?.goBack()
+
+        if let webView = _webView, webView.canGoBack {
+            webView.goBack()
+            return
+        }
+
+        guard persistedNavigationIndex > 0 else { return }
+        let targetIndex = persistedNavigationIndex - 1
+        navigateUsingPersistedHistory(to: targetIndex)
     }
 
     func goForward() {
         guard canGoForward else { return }
-        _webView?.goForward()
+
+        if let webView = _webView, webView.canGoForward {
+            webView.goForward()
+            return
+        }
+
+        guard persistedNavigationIndex + 1 < persistedNavigationHistory.count else { return }
+        let targetIndex = persistedNavigationIndex + 1
+        navigateUsingPersistedHistory(to: targetIndex)
     }
 
     func refresh() {
@@ -412,8 +433,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         // Force UI update by notifying object will change
         objectWillChange.send()
 
-        let newCanGoBack = webView.canGoBack
-        let newCanGoForward = webView.canGoForward
+        let newCanGoBack = webView.canGoBack || persistedNavigationIndex > 0
+        let newCanGoForward = webView.canGoForward || (persistedNavigationIndex + 1 < persistedNavigationHistory.count)
 
         // Only update if values actually changed to prevent unnecessary redraws
         if newCanGoBack != canGoBack || newCanGoForward != canGoForward {
@@ -440,6 +461,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         // Clear restored state after applying
         restoredCanGoBack = nil
         restoredCanGoForward = nil
+        refreshNavigationAvailability()
     }
 
     /// Enhanced navigation state update with aggressive timing for same-domain navigation
@@ -454,6 +476,136 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.updateNavigationState()
+        }
+    }
+
+    var navigationHistoryForPersistence: [String] {
+        let normalized = persistedNavigationHistory.filter { !$0.isEmpty }
+        if normalized.isEmpty {
+            return [url.absoluteString]
+        }
+        return normalized
+    }
+
+    var navigationHistoryIndexForPersistence: Int {
+        let history = navigationHistoryForPersistence
+        guard !history.isEmpty else { return 0 }
+        return min(max(persistedNavigationIndex, 0), history.count - 1)
+    }
+
+    func restoreNavigationHistory(_ history: [String], currentIndex: Int) {
+        let normalized = history.filter { URL(string: $0) != nil }
+        if normalized.isEmpty {
+            persistedNavigationHistory = [url.absoluteString]
+            persistedNavigationIndex = 0
+        } else {
+            persistedNavigationHistory = normalized
+            persistedNavigationIndex = min(max(currentIndex, 0), normalized.count - 1)
+
+            let currentURLString = url.absoluteString
+            if persistedNavigationHistory[persistedNavigationIndex] != currentURLString {
+                if let matchingIndex = persistedNavigationHistory.lastIndex(of: currentURLString) {
+                    persistedNavigationIndex = matchingIndex
+                } else {
+                    persistedNavigationHistory.append(currentURLString)
+                    persistedNavigationIndex = persistedNavigationHistory.count - 1
+                }
+            }
+        }
+
+        pendingPersistedNavigationIndex = nil
+        refreshNavigationAvailability()
+    }
+
+    private func seedPersistedNavigationHistoryIfNeeded(with url: URL) {
+        guard persistedNavigationHistory.isEmpty else { return }
+        persistedNavigationHistory = [url.absoluteString]
+        persistedNavigationIndex = 0
+        pendingPersistedNavigationIndex = nil
+    }
+
+    private func navigateUsingPersistedHistory(to targetIndex: Int) {
+        guard persistedNavigationHistory.indices.contains(targetIndex),
+              let targetURL = URL(string: persistedNavigationHistory[targetIndex]) else { return }
+
+        pendingPersistedNavigationIndex = targetIndex
+        persistedNavigationIndex = targetIndex
+        refreshNavigationAvailability()
+        loadURL(targetURL)
+    }
+
+    private func synchronizePersistedNavigationHistory(with currentURL: URL) {
+        let currentURLString = currentURL.absoluteString
+        persistedNavigationHistory = persistedNavigationHistory.filter { URL(string: $0) != nil }
+
+        if persistedNavigationHistory.isEmpty {
+            persistedNavigationHistory = [currentURLString]
+            persistedNavigationIndex = 0
+            pendingPersistedNavigationIndex = nil
+            refreshNavigationAvailability()
+            return
+        }
+
+        persistedNavigationIndex = min(max(persistedNavigationIndex, 0), persistedNavigationHistory.count - 1)
+
+        if let pendingIndex = pendingPersistedNavigationIndex,
+           persistedNavigationHistory.indices.contains(pendingIndex),
+           persistedNavigationHistory[pendingIndex] == currentURLString {
+            persistedNavigationIndex = pendingIndex
+            pendingPersistedNavigationIndex = nil
+            refreshNavigationAvailability()
+            return
+        }
+
+        pendingPersistedNavigationIndex = nil
+
+        if persistedNavigationHistory[persistedNavigationIndex] == currentURLString {
+            refreshNavigationAvailability()
+            return
+        }
+
+        if persistedNavigationIndex > 0,
+           persistedNavigationHistory[persistedNavigationIndex - 1] == currentURLString {
+            persistedNavigationIndex -= 1
+            refreshNavigationAvailability()
+            return
+        }
+
+        if persistedNavigationIndex + 1 < persistedNavigationHistory.count,
+           persistedNavigationHistory[persistedNavigationIndex + 1] == currentURLString {
+            persistedNavigationIndex += 1
+            refreshNavigationAvailability()
+            return
+        }
+
+        let prefixEnd = min(max(persistedNavigationIndex + 1, 0), persistedNavigationHistory.count)
+        let truncatedHistory = Array(persistedNavigationHistory.prefix(prefixEnd))
+
+        if truncatedHistory.last == currentURLString {
+            persistedNavigationHistory = truncatedHistory
+            persistedNavigationIndex = max(truncatedHistory.count - 1, 0)
+        } else {
+            persistedNavigationHistory = truncatedHistory + [currentURLString]
+            persistedNavigationIndex = persistedNavigationHistory.count - 1
+        }
+
+        refreshNavigationAvailability()
+    }
+
+    private func refreshNavigationAvailability() {
+        let liveCanGoBack = _webView?.canGoBack ?? false
+        let liveCanGoForward = _webView?.canGoForward ?? false
+        let fallbackCanGoBack = persistedNavigationIndex > 0
+        let fallbackCanGoForward = persistedNavigationIndex + 1 < persistedNavigationHistory.count
+
+        let newCanGoBack = liveCanGoBack || fallbackCanGoBack
+        let newCanGoForward = liveCanGoForward || fallbackCanGoForward
+
+        if newCanGoBack != canGoBack {
+            canGoBack = newCanGoBack
+        }
+        if newCanGoForward != canGoForward {
+            canGoForward = newCanGoForward
         }
     }
 
@@ -2612,6 +2764,7 @@ extension Tab: WKNavigationDelegate {
 
         if let newURL = webView.url {
             self.url = newURL
+            synchronizePersistedNavigationHistory(with: newURL)
             if isOAuthFlow {
                 if oauthInitialURL == nil {
                     oauthInitialURL = newURL
@@ -2659,6 +2812,7 @@ extension Tab: WKNavigationDelegate {
 
         if let newURL = webView.url {
             self.url = newURL
+            synchronizePersistedNavigationHistory(with: newURL)
             if #available(macOS 15.5, *) {
                 ExtensionManager.shared.notifyTabPropertiesChanged(self, properties: [.URL])
 
@@ -3131,6 +3285,7 @@ extension Tab: WKScriptMessageHandler {
                 DispatchQueue.main.async {
                     if self.url.absoluteString != url.absoluteString {
                         self.url = url
+                        self.synchronizePersistedNavigationHistory(with: url)
                         self.browserManager?.syncTabAcrossWindows(self.id)
 
                         // Debounce persistence for SPA navigation to avoid excessive writes
@@ -3140,6 +3295,8 @@ extension Tab: WKScriptMessageHandler {
                             guard !Task.isCancelled else { return }
                             self?.browserManager?.tabManager.persistSnapshot()
                         }
+                    } else {
+                        self.refreshNavigationAvailability()
                     }
                 }
             }
@@ -3168,7 +3325,14 @@ extension Tab: WKScriptMessageHandler {
                 for: url,
                 shortcuts: shortcuts
             )
-            browserManager?.keyboardShortcutManager?.websiteShortcutDetector.updateEditableFocus(isEditableFocused)
+
+            // Editable-focus is global at the shortcut-manager layer, so only the
+            // active tab in the active window is allowed to update it. Background
+            // tabs continue reporting state, but they must not knock the browser
+            // out of typing mode while the user is composing in another tab.
+            if browserManager?.currentTabForActiveWindow()?.id == id {
+                browserManager?.keyboardShortcutManager?.websiteShortcutDetector.updateEditableFocus(isEditableFocused)
+            }
             return
         }
 
@@ -3191,16 +3355,21 @@ extension Tab: WKScriptMessageHandler {
 
         markPopupSuppression(for: url)
 
-        let newTab = browserManager.tabManager.createNewTab(
-            url: url.absoluteString,
-            in: browserManager.tabManager.currentSpace
-        )
+        let targetWindowState = owningWindowState() ?? browserManager.windowRegistry?.activeWindow
+        let newTab =
+            targetWindowState.flatMap { browserManager.createNewTab(in: $0, url: url.absoluteString) }
+            ?? browserManager.tabManager.createNewTab(
+                url: url.absoluteString,
+                in: browserManager.tabManager.currentSpace
+            )
 
         if openAsChild {
             browserManager.tabManager.attachTab(newTab, asChildOf: self)
         }
 
-        if openInSplit, let windowState = browserManager.windowRegistry?.activeWindow {
+        if openInSplit,
+           let windowState = targetWindowState,
+           !windowState.isIncognito {
             browserManager.splitManager.enterSplit(with: newTab, placeOn: .right, in: windowState)
         }
     }
@@ -3327,6 +3496,55 @@ extension Tab: WKScriptMessageHandler {
         }
 
         return shouldReuse
+    }
+
+    private func shouldOpenPopupNavigationAsChildTab(
+        navigationAction: WKNavigationAction,
+        isFromExtension: Bool,
+        isLikelyOAuthPopup: Bool
+    ) -> Bool {
+        guard !isFromExtension else { return false }
+        guard !isLikelyOAuthPopup else { return false }
+        guard navigationAction.targetFrame == nil else { return false }
+        guard navigationAction.navigationType == .linkActivated else { return false }
+        guard let url = navigationAction.request.url,
+              let scheme = url.scheme?.lowercased() else { return false }
+
+        return scheme == "http" || scheme == "https" || scheme == "about"
+    }
+
+    private func sourceWindowState(for webView: WKWebView) -> BrowserWindowState? {
+        guard let browserManager,
+              let registry = browserManager.windowRegistry else {
+            return nil
+        }
+
+        if let windowId = browserManager.webViewCoordinator?.windowId(for: webView),
+           let resolvedWindow = registry.windows[windowId] {
+            return resolvedWindow
+        }
+
+        if let exactWindow = registry.windows.values.first(where: { $0.window === webView.window }) {
+            return exactWindow
+        }
+
+        if let ownerWindow = owningWindowState() {
+            return ownerWindow
+        }
+
+        return registry.activeWindow
+    }
+
+    private func owningWindowState() -> BrowserWindowState? {
+        guard let registry = browserManager?.windowRegistry else { return nil }
+
+        if let incognitoOwner = registry.windows.values.first(where: { windowState in
+            windowState.isIncognito && windowState.ephemeralTabs.contains(where: { $0.id == self.id })
+        }) {
+            return incognitoOwner
+        }
+
+        return registry.windows.values.first(where: { $0.currentTabId == self.id })
     }
 
     private func handleOAuthRequest(message: WKScriptMessage) {
@@ -4646,6 +4864,19 @@ extension Tab: WKUIDelegate {
             return nil
         }
 
+        if shouldOpenPopupNavigationAsChildTab(
+            navigationAction: navigationAction,
+            isFromExtension: isFromExtension,
+            isLikelyOAuthPopup: isLikelyOAuthPopup
+        ),
+           let url = navigationAction.request.url,
+           let windowState = sourceWindowState(for: webView),
+           let newTab = bm.createNewTab(in: windowState, url: url.absoluteString) {
+            bm.tabManager.attachTab(newTab, asChildOf: self)
+            print("↪️ [Tab] Opened blank-target link as child tab: \(url.absoluteString)")
+            return nil
+        }
+
         // For OAuth popups, use the MiniBrowser approach: create a WKWebView
         // with the UNMODIFIED WebKit-provided configuration. Any modifications
         // (data store, process pool, message handlers, UA) can break
@@ -4663,15 +4894,23 @@ extension Tab: WKUIDelegate {
                 backing: .buffered,
                 defer: false
             )
+            popupWindow.isReleasedWhenClosed = false
             popupWindow.center()
             popupWindow.title = "Sign In"
             popupWindow.contentView = popupWebView
-            popupWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
 
             // Watch for auth completion and auto-hide after delay
             let openerHost = self.url.host?.lowercased() ?? ""
-            let observer = OAuthPopupObserver(webView: popupWebView, window: popupWindow, openerHost: openerHost)
+            let observer = OAuthPopupObserver(
+                webView: popupWebView,
+                window: popupWindow,
+                openerHost: openerHost,
+                popupHost: url.host?.lowercased() ?? ""
+            )
+            popupWebView.uiDelegate = observer
+            popupWindow.delegate = observer
+            popupWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
 
             // Hold references so they don't get deallocated
             objc_setAssociatedObject(self, "oauthPopupWindow", popupWindow, .OBJC_ASSOCIATION_RETAIN)
@@ -4858,32 +5097,76 @@ extension Tab: WKUIDelegate {
     /// after a delay to avoid the macOS 26 layer tree crash.
     /// Watches popup URL via KVO. When the popup navigates back to the
     /// opener's domain and finishes loading, hides the window.
-    private class OAuthPopupObserver: NSObject {
+    private class OAuthPopupObserver: NSObject, WKUIDelegate, NSWindowDelegate {
         private var urlObservation: NSKeyValueObservation?
         private var loadObservation: NSKeyValueObservation?
         private weak var window: NSWindow?
+        private let openerHost: String
+        private let popupHost: String
         private var callbackDetected = false
         private var didHide = false
 
-        init(webView: WKWebView, window: NSWindow, openerHost: String) {
+        init(webView: WKWebView, window: NSWindow, openerHost: String, popupHost: String) {
             self.window = window
+            self.openerHost = openerHost
+            self.popupHost = popupHost
             super.init()
             urlObservation = webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
-                guard let self, !self.callbackDetected,
-                      let host = wv.url?.host?.lowercased(),
-                      host == openerHost || host.hasSuffix(".\(openerHost)") else { return }
+                guard let self,
+                      !self.callbackDetected,
+                      let url = wv.url,
+                      let host = url.host?.lowercased() else {
+                    return
+                }
+
+                let returnedToOpener =
+                    host == self.openerHost
+                    || host.hasSuffix(".\(self.openerHost)")
+
+                let leftProviderDomain =
+                    !self.popupHost.isEmpty
+                    && host != self.popupHost
+                    && !host.hasSuffix(".\(self.popupHost)")
+                    && !self.popupHost.hasSuffix(".\(host)")
+
+                let noLongerLooksLikeOAuth =
+                    !OAuthDetector.isLikelyOAuthPopupURL(url)
+                    && !OAuthDetector.isLikelyOAuthURL(url)
+
+                guard returnedToOpener || (leftProviderDomain && noLongerLooksLikeOAuth) else {
+                    return
+                }
+
                 self.callbackDetected = true
                 self.urlObservation?.invalidate()
                 self.loadObservation = wv.observe(\.isLoading, options: [.new]) { [weak self] wv, _ in
                     guard let self, !self.didHide, !wv.isLoading else { return }
-                    self.didHide = true
-                    self.loadObservation?.invalidate()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                        self?.window?.orderOut(nil)
-                    }
+                    self.dismissPopup(after: 0.6)
                 }
             }
         }
+
+        func webViewDidClose(_ webView: WKWebView) {
+            dismissPopup(after: 0)
+        }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            dismissPopup(after: 0)
+            return false
+        }
+
+        private func dismissPopup(after delay: TimeInterval) {
+            guard !didHide else { return }
+            didHide = true
+            urlObservation?.invalidate()
+            loadObservation?.invalidate()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let window = self?.window else { return }
+                window.orderOut(nil)
+            }
+        }
+
         deinit { urlObservation?.invalidate(); loadObservation?.invalidate() }
     }
 

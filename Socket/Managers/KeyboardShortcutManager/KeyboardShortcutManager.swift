@@ -184,12 +184,42 @@ class KeyboardShortcutManager {
     }
 
     private func isNativeTextInputFocused() -> Bool {
-        NSApp.keyWindow?.firstResponder is NSTextView
+        guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView else {
+            return false
+        }
+
+        // SwiftUI/AppKit field editors can linger as first responder after transient
+        // browser UI closes. Only let a field editor suppress single-key shortcuts
+        // when one of the browser's intentional text surfaces is visibly open.
+        if textView.isFieldEditor {
+            let activeWindow = windowRegistry?.activeWindow
+            let hasVisibleBrowserTextSurface =
+                browserManager?.findManager.isFindBarVisible == true ||
+                browserManager?.dialogManager.isVisible == true ||
+                activeWindow?.isSidebarMenuVisible == true ||
+                activeWindow?.isSidebarAIChatVisible == true ||
+                activeWindow?.isCommandPaletteVisible == true ||
+                activeWindow?.isSidebarInlineEditing == true
+
+            if !hasVisibleBrowserTextSurface {
+                return false
+            }
+        }
+
+        return true
     }
 
     private func shouldHandleModifierlessShortcut(_ keyCombination: KeyCombination) -> Bool {
-        guard keyCombination.modifiers.isEmpty else { return true }
+        let hasExplicitCommandModifiers =
+            keyCombination.modifiers.contains(.command) ||
+            keyCombination.modifiers.contains(.option) ||
+            keyCombination.modifiers.contains(.control)
+
+        // Treat bare and shift-only shortcuts as Sigma-style single-key navigation.
+        // They should never fire while the user is typing in a native or web text field.
+        guard !hasExplicitCommandModifiers else { return true }
         guard sigmaCommandModeEnabled else { return false }
+        guard browserManager?.dialogManager.isVisible != true else { return false }
         guard !isNativeTextInputFocused() else { return false }
         guard windowRegistry?.activeWindow?.isInsertModeEnabled != true else { return false }
         guard !websiteShortcutDetector.isEditableElementFocused else { return false }
@@ -473,23 +503,9 @@ class KeyboardShortcutManager {
             switch action {
             // Navigation
             case .goBack:
-                // Use window-specific webview like the UI buttons do
-                if let tab = browserManager.currentTabForActiveWindow(),
-                   let windowId = self.windowRegistry?.activeWindow?.id,
-                   let webView = browserManager.getWebView(for: tab.id, in: windowId) {
-                    if webView.canGoBack {
-                        webView.goBack()
-                    }
-                }
+                browserManager.currentTabForActiveWindow()?.goBack()
             case .goForward:
-                // Use window-specific webview like the UI buttons do
-                if let tab = browserManager.currentTabForActiveWindow(),
-                   let windowId = self.windowRegistry?.activeWindow?.id,
-                   let webView = browserManager.getWebView(for: tab.id, in: windowId) {
-                    if webView.canGoForward {
-                        webView.goForward()
-                    }
-                }
+                browserManager.currentTabForActiveWindow()?.goForward()
             case .refresh:
                 browserManager.refreshCurrentTabInActiveWindow()
             case .clearCookiesAndRefresh:

@@ -26,6 +26,8 @@ final class TabEntity {
     var currentURLString: String? // The actual current page URL (may differ from urlString after navigation)
     var canGoBack: Bool = false
     var canGoForward: Bool = false
+    var navigationHistoryData: Data?
+    var navigationHistoryIndex: Int = 0
 
     init(
         id: UUID,
@@ -40,7 +42,9 @@ final class TabEntity {
         parentTabId: UUID? = nil,
         currentURLString: String? = nil,
         canGoBack: Bool = false,
-        canGoForward: Bool = false
+        canGoForward: Bool = false,
+        navigationHistoryData: Data? = nil,
+        navigationHistoryIndex: Int = 0
     ) {
         self.id = id
         self.urlString = urlString
@@ -57,6 +61,8 @@ final class TabEntity {
         self.currentURLString = currentURLString ?? urlString
         self.canGoBack = canGoBack
         self.canGoForward = canGoForward
+        self.navigationHistoryData = navigationHistoryData
+        self.navigationHistoryIndex = navigationHistoryIndex
     }
 }
 

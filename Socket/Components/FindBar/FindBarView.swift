@@ -5,12 +5,13 @@
 //  Created by Assistant on 28/12/2024.
 //
 
+import AppKit
 import SwiftUI
 import UniversalGlass
 
 struct FindBarView: View {
     @ObservedObject var findManager: FindManager
-    @FocusState private var isTextFieldFocused: Bool
+    @State private var focusRequestID: Int = 0
 
     // Hover states for buttons
     @State private var isUpButtonHovered = false
@@ -34,17 +35,21 @@ struct FindBarView: View {
                                 .foregroundColor(.secondary)
                                 .font(.system(size: 13))
 
-                            TextField("Find in page", text: $findManager.searchText)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 13))
-                                .frame(width: 160)
-                                .focused($isTextFieldFocused)
-                                .onSubmit {
-                                    findManager.findNext()
-                                }
-                                .onChange(of: findManager.searchText) { _, newValue in
+                            FindBarTextField(
+                                placeholder: "Find in page",
+                                text: $findManager.searchText,
+                                focusRequestID: focusRequestID,
+                                onTextChange: { newValue in
                                     findManager.search(for: newValue, in: findManager.currentTab)
+                                },
+                                onSubmit: {
+                                    findManager.findNext()
+                                },
+                                onEscape: {
+                                    findManager.hideFindBar()
                                 }
+                            )
+                                .frame(width: 160)
                         }
 
                         // Match count - always present to maintain consistent width
@@ -156,20 +161,107 @@ struct FindBarView: View {
         // Focus management
         .onChange(of: findManager.isFindBarVisible) { _, isVisible in
             if isVisible {
-                DispatchQueue.main.async {
-                    isTextFieldFocused = true
-                }
+                requestFieldFocus()
             } else {
-                isTextFieldFocused = false
+                focusRequestID = 0
             }
         }
-        // Only handle escape when find bar is visible
-        if findManager.isFindBarVisible {
-            EmptyView()
-                .onKeyPress(.escape) {
-                    findManager.hideFindBar()
-                    return .handled
-                }
+        .onAppear {
+            if findManager.isFindBarVisible {
+                requestFieldFocus()
+            }
+        }
+    }
+
+    private func requestFieldFocus() {
+        focusRequestID += 1
+
+        // AppKit responder changes can race with the web view after Cmd+F.
+        // Nudging once more on the next tick makes focus deterministic.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            focusRequestID += 1
+        }
+    }
+}
+
+private struct FindBarTextField: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    let focusRequestID: Int
+    let onTextChange: (String) -> Void
+    let onSubmit: () -> Void
+    let onEscape: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField(string: text)
+        textField.delegate = context.coordinator
+        textField.placeholderString = placeholder
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.drawsBackground = false
+        textField.focusRingType = .none
+        textField.font = .systemFont(ofSize: 13)
+        textField.textColor = .labelColor
+        textField.maximumNumberOfLines = 1
+        textField.lineBreakMode = .byTruncatingTail
+        textField.usesSingleLineMode = true
+        return textField
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+
+        guard context.coordinator.lastFocusRequestID != focusRequestID else { return }
+        context.coordinator.lastFocusRequestID = focusRequestID
+
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            window.makeFirstResponder(nsView)
+
+            if let editor = window.fieldEditor(true, for: nsView) as? NSTextView {
+                editor.selectAll(nil)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: FindBarTextField
+        var lastFocusRequestID: Int = -1
+
+        init(parent: FindBarTextField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let textField = notification.object as? NSTextField else { return }
+            let newValue = textField.stringValue
+            if parent.text != newValue {
+                parent.text = newValue
+            }
+            parent.onTextChange(newValue)
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                parent.onSubmit()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                parent.onEscape()
+                return true
+            default:
+                return false
+            }
         }
     }
 }

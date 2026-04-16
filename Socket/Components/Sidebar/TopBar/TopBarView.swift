@@ -346,29 +346,11 @@ struct TopBarView: View {
     }
 
     private func goBack() {
-        if let tab = tabWrapper.tab,
-            let webView = browserManager.getWebView(
-                for: tab.id,
-                in: windowState.id
-            )
-        {
-            webView.goBack()
-        } else {
-            tabWrapper.tab?.goBack()
-        }
+        tabWrapper.tab?.goBack()
     }
 
     private func goForward() {
-        if let tab = tabWrapper.tab,
-            let webView = browserManager.getWebView(
-                for: tab.id,
-                in: windowState.id
-            )
-        {
-            webView.goForward()
-        } else {
-            tabWrapper.tab?.goForward()
-        }
+        tabWrapper.tab?.goForward()
     }
 
     private func refreshCurrentTab() {

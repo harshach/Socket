@@ -14,22 +14,10 @@ class ObservableTabWrapper: ObservableObject {
     weak var windowState: BrowserWindowState?
     
     var canGoBack: Bool {
-        if let tab = tab,
-           let browserManager = browserManager,
-           let windowState = windowState,
-           let webView = browserManager.getWebView(for: tab.id, in: windowState.id) {
-            return webView.canGoBack
-        }
         return tab?.canGoBack ?? false
     }
-    
+
     var canGoForward: Bool {
-        if let tab = tab,
-           let browserManager = browserManager,
-           let windowState = windowState,
-           let webView = browserManager.getWebView(for: tab.id, in: windowState.id) {
-            return webView.canGoForward
-        }
         return tab?.canGoForward ?? false
     }
     
@@ -173,21 +161,11 @@ struct NavButtonsView: View {
     }
     
     private func goBack() {
-        if let tab = tabWrapper.tab,
-           let webView = browserManager.getWebView(for: tab.id, in: windowState.id) {
-            webView.goBack()
-        } else {
-            tabWrapper.tab?.goBack()
-        }
+        tabWrapper.tab?.goBack()
     }
     
     private func goForward() {
-        if let tab = tabWrapper.tab,
-           let webView = browserManager.getWebView(for: tab.id, in: windowState.id) {
-            webView.goForward()
-        } else {
-            tabWrapper.tab?.goForward()
-        }
+        tabWrapper.tab?.goForward()
     }
     
     private func refreshCurrentTab() {

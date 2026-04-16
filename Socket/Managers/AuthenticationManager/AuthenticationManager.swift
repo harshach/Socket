@@ -97,7 +97,18 @@ final class AuthenticationManager: NSObject {
         activeIdentityTab = tab
         waitingForMiniWindow = true
 
-        manager.externalMiniWindowManager.present(url: request.url) { [weak self] success, finalURL in
+        let sourceWindow =
+            manager.windowRegistry?.allWindows.first(where: {
+                $0.currentTabId == tab.id
+                    || $0.activeTabForSpace.values.contains(tab.id)
+                    || $0.ephemeralTabs.contains(where: { $0.id == tab.id })
+            }) ?? manager.windowRegistry?.activeWindow
+
+        manager.externalMiniWindowManager.present(
+            url: request.url,
+            preferredWindowId: sourceWindow?.id,
+            sourceWindowFrame: sourceWindow?.window?.frame
+        ) { [weak self] success, finalURL in
             guard let self else { return }
             Task { @MainActor in
                 self.handleMiniWindowCompletion(success: success, finalURL: finalURL)

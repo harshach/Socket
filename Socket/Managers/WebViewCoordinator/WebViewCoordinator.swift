@@ -73,6 +73,15 @@ class WebViewCoordinator {
         return Array(windowWebViews.values)
     }
 
+    func windowId(for webView: WKWebView) -> UUID? {
+        for (_, windowWebViews) in webViewsByTabAndWindow {
+            if let match = windowWebViews.first(where: { $0.value === webView }) {
+                return match.key
+            }
+        }
+        return nil
+    }
+
     func setWebView(_ webView: WKWebView, for tabId: UUID, in windowId: UUID) {
         if webViewsByTabAndWindow[tabId] == nil {
             webViewsByTabAndWindow[tabId] = [:]

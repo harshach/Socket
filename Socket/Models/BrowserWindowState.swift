@@ -58,6 +58,10 @@ class BrowserWindowState {
     /// Whether the command palette is visible in this window
     var isCommandPaletteVisible: Bool = false
 
+    /// Whether an inline editable control in the sidebar is currently active.
+    /// Used to suppress Sigma-style single-key shortcuts while typing.
+    var isSidebarInlineEditing: Bool = false
+
     /// Frame of the URL bar within this window
     var urlBarFrame: CGRect = .zero
 

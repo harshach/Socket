@@ -13,6 +13,7 @@ struct SidebarHoverOverlayView: View {
     @EnvironmentObject var browserManager: BrowserManager
     @EnvironmentObject var hoverManager: HoverSidebarManager
     @Environment(BrowserWindowState.self) private var windowState
+    @Environment(WindowRegistry.self) private var windowRegistry
     @Environment(CommandPalette.self) private var commandPalette
     @Environment(\.socketSettings) var socketSettings
 
@@ -21,18 +22,26 @@ struct SidebarHoverOverlayView: View {
     private let verticalInset: CGFloat = 7
 
     var body: some View {
-        // Only render overlay plumbing when the real sidebar is collapsed
-        if !windowState.isSidebarVisible {
+        let isActiveWindow = windowRegistry.activeWindow?.id == windowState.id
+        let canRenderOverlay = isActiveWindow
+            && !windowState.isSidebarVisible
+            && !windowState.isFocusModeEnabled
+            && !windowState.isSidebarMenuVisible
+            && !windowState.isSidebarAIChatVisible
+            && !windowState.isCommandPaletteVisible
+
+        // Only render overlay plumbing when the real sidebar is collapsed.
+        if canRenderOverlay {
             ZStack(alignment: socketSettings.sidebarPosition == .left ? .leading : .trailing) {
                 // Edge hover hotspot
                 Color.clear
                     .frame(width: hoverManager.triggerWidth)
                     .contentShape(Rectangle())
                     .onHover { isIn in
-                        if isIn && !windowState.isSidebarVisible {
-                            withAnimation(.easeInOut(duration: 0.12)) {
-                                hoverManager.isOverlayVisible = true
-                            }
+                        if isIn {
+                            hoverManager.revealFromHotspot()
+                        } else {
+                            hoverManager.refreshVisibility()
                         }
                         NSCursor.arrow.set()
                     }
@@ -69,6 +78,34 @@ struct SidebarHoverOverlayView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: socketSettings.sidebarPosition == .left ? .topLeading : .topTrailing)
             // Container remains passive; only overlay/hotspot intercept
+            .onAppear {
+                hoverManager.refreshVisibility()
+            }
+            .onDisappear {
+                hoverManager.dismissOverlay()
+            }
+            .onChange(of: windowRegistry.activeWindow?.id) { _, _ in
+                hoverManager.refreshVisibility()
+            }
+            .onChange(of: windowState.isSidebarVisible) { _, isVisible in
+                if isVisible {
+                    hoverManager.dismissOverlay()
+                } else {
+                    hoverManager.refreshVisibility()
+                }
+            }
+            .onChange(of: windowState.isFocusModeEnabled) { _, _ in
+                hoverManager.refreshVisibility()
+            }
+            .onChange(of: windowState.isSidebarMenuVisible) { _, _ in
+                hoverManager.refreshVisibility()
+            }
+            .onChange(of: windowState.isSidebarAIChatVisible) { _, _ in
+                hoverManager.refreshVisibility()
+            }
+            .onChange(of: windowState.isCommandPaletteVisible) { _, _ in
+                hoverManager.refreshVisibility()
+            }
         }
     }
 }

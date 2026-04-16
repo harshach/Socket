@@ -353,6 +353,23 @@ extension WebsiteShortcutDetector {
                 }
             }
 
+            function selectedNodeForRoot(root) {
+                try {
+                    if (!root || typeof root.getSelection !== 'function') {
+                        return null;
+                    }
+
+                    const selection = root.getSelection();
+                    if (!selection || selection.rangeCount === 0) {
+                        return null;
+                    }
+
+                    return selection.anchorNode || selection.focusNode || null;
+                } catch (error) {
+                    return null;
+                }
+            }
+
             function isEditableElement(element) {
                 if (!element) return false;
                 if (document.designMode === 'on') return true;
@@ -369,10 +386,6 @@ extension WebsiteShortcutDetector {
                     const isReadOnly = current.hasAttribute?.('readonly') || current.getAttribute?.('aria-readonly') === 'true';
 
                     if (!isDisabled && !isReadOnly) {
-                        if (tagName === 'IFRAME') {
-                            return true;
-                        }
-
                         if (tagName === 'TEXTAREA' || tagName === 'SELECT') {
                             return true;
                         }
@@ -399,14 +412,36 @@ extension WebsiteShortcutDetector {
                 return false;
             }
 
+            function activeEditableTarget(root) {
+                const activeElement = activeElementForRoot(root);
+                if (isEditableElement(activeElement)) {
+                    return activeElement;
+                }
+
+                const activeTagName = (activeElement?.tagName || '').toUpperCase();
+                const shouldInspectSelection =
+                    !activeElement ||
+                    activeTagName === 'BODY' ||
+                    activeTagName === 'HTML';
+
+                if (shouldInspectSelection) {
+                    const selectedNode = selectedNodeForRoot(root);
+                    if (isEditableElement(selectedNode)) {
+                        return selectedNode;
+                    }
+                }
+
+                return activeElement || null;
+            }
+
             // Report detected shortcuts and editable focus state to native.
             function reportState(force) {
                 if (!window.webkit?.messageHandlers?.socketShortcutDetect) {
                     return;
                 }
 
-                const activeElement = activeElementForRoot(document);
-                const isEditableFocused = isEditableElement(activeElement);
+                const activeTarget = activeEditableTarget(document);
+                const isEditableFocused = isEditableElement(activeTarget);
                 const shortcuts = Array.from(detectedShortcuts).sort();
                 const shortcutSignature = shortcuts.join(',');
 
@@ -454,8 +489,8 @@ extension WebsiteShortcutDetector {
             document.addEventListener('keyup', () => queueReport(true), true);
             document.addEventListener('mousedown', () => queueReport(false), true);
             document.addEventListener('mouseup', () => queueReport(false), true);
-            document.addEventListener('click', () => queueReport(false), true);
-            document.addEventListener('selectionchange', () => queueReport(false), true);
+            document.addEventListener('click', () => queueReport(true), true);
+            document.addEventListener('selectionchange', () => queueReport(true), true);
             window.addEventListener('focus', () => queueReport(true), true);
             window.addEventListener('blur', () => queueReport(true), true);
 

@@ -857,6 +857,10 @@ class BrowserManager: ObservableObject {
                 windowState.isSidebarMenuVisible = false
             }
         }
+
+        if !windowState.isSidebarAIChatVisible {
+            refocusActiveWebView(in: windowState)
+        }
     }
 
     // MARK: - Sidebar width access for overlays
@@ -881,6 +885,7 @@ class BrowserManager: ObservableObject {
     func showFindBar() {
         if findManager.isFindBarVisible {
             findManager.hideFindBar()
+            refocusActiveWebView()
         } else {
             findManager.showFindBar(for: currentTabForActiveWindow())
         }
@@ -2025,18 +2030,28 @@ class BrowserManager: ObservableObject {
     /// Routes an external URL either into the active browsing context or the
     /// opt-in external view.
     func presentExternalURL(_ url: URL) {
+        let preferredWindow = preferredWindowForExternalURL()
+        let preferredProfile =
+            preferredWindow?.currentProfileId.flatMap { profileId in
+                profileManager.profiles.first(where: { $0.id == profileId })
+            } ?? preferredProfileForExternalURL()
+
         if socketSettings?.openExternalLinksInMiniWindow == true {
             externalMiniWindowManager.present(
                 url: url,
-                profile: preferredProfileForExternalURL()
+                profile: preferredProfile,
+                preferredWindowId: preferredWindow?.id,
+                sourceWindowFrame: preferredWindow?.window?.frame
             )
             return
         }
 
-        guard let targetWindow = preferredWindowForExternalURL() else {
+        guard let targetWindow = preferredWindow else {
             externalMiniWindowManager.present(
                 url: url,
-                profile: preferredProfileForExternalURL()
+                profile: preferredProfile,
+                preferredWindowId: preferredWindow?.id,
+                sourceWindowFrame: preferredWindow?.window?.frame
             )
             return
         }
@@ -2085,14 +2100,9 @@ class BrowserManager: ObservableObject {
         windowState.savedSidebarWidth = savedSidebarWidth
         windowState.isCommandPaletteVisible = false
 
-        // Set the NSWindow reference for keyboard shortcuts
-        if let window = NSApplication.shared.windows.first(where: {
-            $0.contentView?.subviews.contains(where: {
-                ($0 as? NSHostingView<ContentView>) != nil
-            }) ?? false
-        }) {
-            windowState.window = window
-        }
+        // The live NSWindow reference is attached by WindowFocusBridge when the
+        // SwiftUI view is mounted. Avoid guessing here because a global "first"
+        // window can point at the wrong browser window and break frame-based UX.
         windowState.urlBarFrame = urlBarFrame
         windowState.currentProfileId = currentProfile?.id
 
@@ -2757,6 +2767,10 @@ class BrowserManager: ObservableObject {
                 windowState.isSidebarMenuVisible = false
             }
         }
+
+        if windowState.isFocusModeEnabled {
+            refocusActiveWebView(in: windowState)
+        }
     }
 
     func toggleSplitMode() {
@@ -3076,6 +3090,17 @@ class BrowserManager: ObservableObject {
         NotificationCenter.default.post(name: .openSidebarMenuShortcuts, object: nil)
     }
 
+    func dismissSidebarMenu(for windowState: BrowserWindowState) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            windowState.isSidebarMenuVisible = false
+            let restoredWidth = windowState.savedSidebarWidth
+            windowState.sidebarWidth = restoredWidth
+            windowState.sidebarContentWidth = max(restoredWidth - 16, 0)
+        }
+
+        refocusActiveWebView(in: windowState)
+    }
+
     private func presentSidebarMenu(for windowState: BrowserWindowState) {
         withAnimation(.easeInOut(duration: 0.2)) {
             let previousWidth = windowState.sidebarWidth > 0
@@ -3098,6 +3123,23 @@ class BrowserManager: ObservableObject {
             savedSidebarWidth = windowState.savedSidebarWidth
             sidebarContentWidth = windowState.sidebarContentWidth
         }
+    }
+
+    private func refocusActiveWebView(in windowState: BrowserWindowState? = nil) {
+        let targetWindow = windowState ?? windowRegistry?.activeWindow
+        guard let targetWindow,
+              let tab = currentTab(for: targetWindow),
+              let webView = getWebView(for: tab.id, in: targetWindow.id) else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            targetWindow.window?.makeFirstResponder(webView)
+        }
+    }
+
+    func restoreWebViewFocus(in windowState: BrowserWindowState? = nil) {
+        refocusActiveWebView(in: windowState)
     }
 
     // MARK: - Tab Closure Undo Notification

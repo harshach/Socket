@@ -10,13 +10,31 @@ import WebKit
 import AppKit
 import Combine
 
+struct MiniWindowSpaceDestination: Identifiable, Hashable {
+    let id: UUID
+    let name: String
+    let profileName: String?
+    let isCurrent: Bool
+
+    var menuTitle: String {
+        if let profileName, !profileName.isEmpty {
+            return "\(name)  •  \(profileName)"
+        }
+        return name
+    }
+}
+
 @MainActor
 final class MiniWindowSession: ObservableObject, Identifiable {
     let id = UUID()
     let profile: Profile?
     let originName: String
-    private let targetSpaceResolver: () -> String
-    private let adoptHandler: (MiniWindowSession) -> Void
+    let currentSpaceLabel: String
+    let currentSpaceProfileName: String?
+    let availableDestinations: [MiniWindowSpaceDestination]
+    private let adoptCurrentSpaceHandler: (MiniWindowSession) -> Void
+    private let adoptDestinationHandler: (MiniWindowSession, MiniWindowSpaceDestination) -> Void
+    private let alwaysUseExternalViewHandler: (Bool) -> Void
     private let authCompletionHandler: ((Bool, URL?) -> Void)?
 
     @Published var currentURL: URL
@@ -26,28 +44,91 @@ final class MiniWindowSession: ObservableObject, Identifiable {
     @Published var isAuthComplete: Bool = false
     @Published var authSuccess: Bool = false
     @Published var toolbarColor: NSColor?
+    @Published var alwaysUseExternalView: Bool
+    @Published var selectedDestinationId: UUID?
 
     init(
         url: URL,
         profile: Profile?,
         originName: String,
-        targetSpaceResolver: @escaping () -> String,
-        adoptHandler: @escaping (MiniWindowSession) -> Void,
+        currentSpaceLabel: String,
+        currentSpaceProfileName: String?,
+        availableDestinations: [MiniWindowSpaceDestination],
+        alwaysUseExternalView: Bool,
+        adoptCurrentSpaceHandler: @escaping (MiniWindowSession) -> Void,
+        adoptDestinationHandler: @escaping (MiniWindowSession, MiniWindowSpaceDestination) -> Void,
+        alwaysUseExternalViewHandler: @escaping (Bool) -> Void,
         authCompletionHandler: ((Bool, URL?) -> Void)? = nil
     ) {
         self.profile = profile
         self.originName = originName
-        self.targetSpaceResolver = targetSpaceResolver
-        self.adoptHandler = adoptHandler
+        self.currentSpaceLabel = currentSpaceLabel
+        self.currentSpaceProfileName = currentSpaceProfileName
+        self.availableDestinations = availableDestinations
+        self.alwaysUseExternalView = alwaysUseExternalView
+        self.adoptCurrentSpaceHandler = adoptCurrentSpaceHandler
+        self.adoptDestinationHandler = adoptDestinationHandler
+        self.alwaysUseExternalViewHandler = alwaysUseExternalViewHandler
         self.authCompletionHandler = authCompletionHandler
         self.currentURL = url
         self.title = url.absoluteString
+        self.selectedDestinationId = nil
     }
 
-    var targetSpaceName: String { targetSpaceResolver() }
-
     func adopt() {
-        adoptHandler(self)
+        adoptCurrentSpaceHandler(self)
+    }
+
+    func adopt(to destination: MiniWindowSpaceDestination) {
+        adoptDestinationHandler(self, destination)
+    }
+
+    func openSelectedDestination() {
+        if let selectedDestination {
+            adopt(to: selectedDestination)
+        } else {
+            adopt()
+        }
+    }
+
+    func selectCurrentSpace() {
+        selectedDestinationId = nil
+    }
+
+    func selectDestination(_ destination: MiniWindowSpaceDestination) {
+        selectedDestinationId = destination.id
+    }
+
+    var selectedDestination: MiniWindowSpaceDestination? {
+        availableDestinations.first(where: { $0.id == selectedDestinationId })
+    }
+
+    var selectedDestinationLabel: String {
+        selectedDestination?.name ?? currentSpaceLabel
+    }
+
+    var selectedDestinationMenuTitle: String {
+        selectedDestination?.menuTitle ?? currentSpaceMenuTitle
+    }
+
+    var currentSpaceMenuTitle: String {
+        if let currentSpaceProfileName, !currentSpaceProfileName.isEmpty {
+            return "\(currentSpaceLabel)  •  \(currentSpaceProfileName)"
+        }
+        return currentSpaceLabel
+    }
+
+    func isSelected(_ destination: MiniWindowSpaceDestination) -> Bool {
+        selectedDestinationId == destination.id
+    }
+
+    func setAlwaysUseExternalView(_ value: Bool) {
+        alwaysUseExternalView = value
+        alwaysUseExternalViewHandler(value)
+    }
+
+    func toggleAlwaysUseExternalView() {
+        setAlwaysUseExternalView(!alwaysUseExternalView)
     }
 
     func updateNavigationState(url: URL?, title: String?) {
@@ -116,38 +197,71 @@ final class ExternalMiniWindowManager {
     func present(
         url: URL,
         profile: Profile? = nil,
+        preferredWindowId: UUID? = nil,
+        sourceWindowFrame: NSRect? = nil,
         authCompletionHandler: ((Bool, URL?) -> Void)? = nil
     ) {
         guard let browserManager else { return }
         let resolvedProfile = profile ?? browserManager.currentProfile
+        let preferredWindow = preferredBrowserWindow(explicitWindowId: preferredWindowId)
+        let resolvedSourceWindowFrame =
+            sourceWindowFrame
+            ?? preferredWindow?.window?.frame
+            ?? fallbackVisibleBrowserWindowFrame()
+        let fallbackSpace = resolvedCurrentSpace(
+            preferredWindowId: preferredWindow?.id,
+            fallbackSpaceId: nil
+        ) ?? browserManager.tabManager.currentSpace ?? browserManager.tabManager.spaces.first
+        let originWindowId = preferredWindow?.id
+        let profileLookup = Dictionary(
+            uniqueKeysWithValues: browserManager.profileManager.profiles.map { ($0.id, $0.name) }
+        )
+        let destinations = browserManager.tabManager.spaces.map { space in
+            MiniWindowSpaceDestination(
+                id: space.id,
+                name: space.name,
+                profileName: space.profileId.flatMap { profileLookup[$0] },
+                isCurrent: space.id == fallbackSpace?.id
+            )
+        }
         let session = MiniWindowSession(
             url: url,
             profile: resolvedProfile,
             originName: resolvedProfile?.name ?? "Default",
-            targetSpaceResolver: { [weak browserManager] in
-                // Try to get the current space, or fall back to the first available space
-                if let currentSpace = browserManager?.tabManager.currentSpace {
-                    return currentSpace.name
-                } else if let firstSpace = browserManager?.tabManager.spaces.first {
-                    return firstSpace.name
-                } else {
-                    return "Current Space"
-                }
+            currentSpaceLabel: fallbackSpace?.name ?? "Current Space",
+            currentSpaceProfileName: fallbackSpace?.profileId.flatMap { profileLookup[$0] },
+            availableDestinations: destinations.filter { $0.id != fallbackSpace?.id },
+            alwaysUseExternalView: browserManager.socketSettings?.openExternalLinksInMiniWindow == true,
+            adoptCurrentSpaceHandler: { [weak self] session in
+                self?.adoptIntoCurrentSpace(
+                    session: session,
+                    preferredWindowId: preferredWindow?.id,
+                    fallbackSpaceId: fallbackSpace?.id
+                )
             },
-            adoptHandler: { [weak self] session in
-                self?.adopt(session: session)
+            adoptDestinationHandler: { [weak self] session, destination in
+                self?.adopt(
+                    session: session,
+                    intoSpaceId: destination.id,
+                    preferredWindowId: preferredWindow?.id
+                )
+            },
+            alwaysUseExternalViewHandler: { [weak browserManager] value in
+                browserManager?.socketSettings?.openExternalLinksInMiniWindow = value
             },
             authCompletionHandler: authCompletionHandler
         )
 
         let controller = MiniBrowserWindowController(
             session: session,
-            adoptAction: { [weak session] in session?.adopt() },
+            adoptAction: { [weak session] in session?.openSelectedDestination() },
             onClose: { [weak self] session in
                 session.cancelAuthDueToClose()
                 self?.sessions[session.id] = nil
+                self?.restoreBrowserFocus(preferredWindowId: originWindowId)
             },
-            gradientColorManager: browserManager.gradientColorManager
+            gradientColorManager: browserManager.gradientColorManager,
+            sourceWindowFrame: resolvedSourceWindowFrame
         )
 
         sessions[session.id] = SessionEntry(controller: controller)
@@ -155,20 +269,233 @@ final class ExternalMiniWindowManager {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func adopt(session: MiniWindowSession) {
+    private func preferredBrowserWindow(explicitWindowId: UUID? = nil) -> BrowserWindowState? {
+        guard let browserManager else { return nil }
+
+        if let explicitWindowId,
+           let explicitWindow = browserManager.windowRegistry?.windows[explicitWindowId] {
+            return explicitWindow
+        }
+
+        if let keyWindow = NSApp.keyWindow,
+           let matchedWindow = browserManager.windowRegistry?.allWindows.first(where: { $0.window === keyWindow }) {
+            return matchedWindow
+        }
+
+        if let activeWindow = browserManager.windowRegistry?.activeWindow,
+           activeWindow.window != nil {
+            return activeWindow
+        }
+
+        if let mainWindow = NSApp.mainWindow,
+           let matchedWindow = browserManager.windowRegistry?.allWindows.first(where: { $0.window === mainWindow }) {
+            return matchedWindow
+        }
+
+        if let visibleWindow = visibleBrowserWindows().first {
+            return visibleWindow
+        }
+
+        if let attachedWindow = browserManager.windowRegistry?.allWindows.first(where: { $0.window != nil }) {
+            return attachedWindow
+        }
+
+        return browserManager.windowRegistry?.allWindows.first
+    }
+
+    private func fallbackVisibleBrowserWindowFrame() -> NSRect? {
+        if let visibleBrowserFrame = visibleBrowserWindows().first?.window?.frame {
+            return visibleBrowserFrame
+        }
+
+        if let keyWindow = NSApp.keyWindow,
+           keyWindow.isVisible,
+           keyWindow.className == NSWindow.className() {
+            return keyWindow.frame
+        }
+
+        if let mainWindow = NSApp.mainWindow,
+           mainWindow.isVisible,
+           mainWindow.className == NSWindow.className() {
+            return mainWindow.frame
+        }
+
+        if let orderedWindow = NSApp.orderedWindows.first(where: {
+            $0.isVisible
+                && !$0.isMiniaturized
+                && $0.level == .normal
+                && $0 !== NSApp.keyWindow
+        }) {
+            return orderedWindow.frame
+        }
+
+        return nil
+    }
+
+    private func visibleBrowserWindows() -> [BrowserWindowState] {
+        guard let browserManager else { return [] }
+
+        return browserManager.windowRegistry?.allWindows
+            .filter { windowState in
+                guard let window = windowState.window else { return false }
+                return window.isVisible && !window.isMiniaturized
+            }
+            .sorted { lhs, rhs in
+                guard let lhsWindow = lhs.window, let rhsWindow = rhs.window else { return false }
+
+                if lhsWindow.isKeyWindow != rhsWindow.isKeyWindow {
+                    return lhsWindow.isKeyWindow && !rhsWindow.isKeyWindow
+                }
+
+                if lhsWindow.isMainWindow != rhsWindow.isMainWindow {
+                    return lhsWindow.isMainWindow && !rhsWindow.isMainWindow
+                }
+
+                let lhsArea = lhsWindow.frame.width * lhsWindow.frame.height
+                let rhsArea = rhsWindow.frame.width * rhsWindow.frame.height
+                return lhsArea > rhsArea
+            } ?? []
+    }
+
+    private func resolvedCurrentSpace(
+        preferredWindowId: UUID?,
+        fallbackSpaceId: UUID?
+    ) -> Space? {
+        guard let browserManager else { return nil }
+
+        if let preferredWindowId,
+           let preferredWindow = browserManager.windowRegistry?.windows[preferredWindowId],
+           let currentSpaceId = preferredWindow.currentSpaceId,
+           let preferredSpace = browserManager.tabManager.spaces.first(where: { $0.id == currentSpaceId }) {
+            return preferredSpace
+        }
+
+        if let fallbackSpaceId,
+           let fallbackSpace = browserManager.tabManager.spaces.first(where: { $0.id == fallbackSpaceId }) {
+            return fallbackSpace
+        }
+
+        return browserManager.tabManager.currentSpace ?? browserManager.tabManager.spaces.first
+    }
+
+    private func resolveTargetWindow(
+        preferredWindowId: UUID?,
+        createIfNeeded: Bool = true,
+        attemptsRemaining: Int = 4,
+        completion: @escaping (BrowserWindowState?) -> Void
+    ) {
+        if let browserManager,
+           let preferredWindowId,
+           let preferredWindow = browserManager.windowRegistry?.windows[preferredWindowId] {
+            completion(preferredWindow)
+            return
+        }
+
+        if let preferredWindow = preferredBrowserWindow() {
+            completion(preferredWindow)
+            return
+        }
+
+        if createIfNeeded, let browserManager {
+            browserManager.createNewWindow()
+        }
+
+        guard attemptsRemaining > 0 else {
+            completion(preferredBrowserWindow())
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.resolveTargetWindow(
+                preferredWindowId: preferredWindowId,
+                createIfNeeded: false,
+                attemptsRemaining: attemptsRemaining - 1,
+                completion: completion
+            )
+        }
+    }
+
+    private func restoreBrowserFocus(preferredWindowId: UUID?) {
         guard let browserManager else { return }
 
-        // Find the target space - try current space first, then fall back to space name matching
-        let targetSpace = browserManager.tabManager.currentSpace ??
-                         browserManager.tabManager.spaces.first { $0.name == session.targetSpaceName } ??
-                         browserManager.tabManager.spaces.first
+        DispatchQueue.main.async { [weak self, weak browserManager] in
+            guard let self, let browserManager else { return }
 
-        let newTab = browserManager.tabManager.createNewTab(url: session.currentURL.absoluteString, in: targetSpace)
-        browserManager.tabManager.setActiveTab(newTab)
+            let targetWindow =
+                preferredWindowId.flatMap { browserManager.windowRegistry?.windows[$0] }
+                ?? self.preferredBrowserWindow(explicitWindowId: preferredWindowId)
+                ?? browserManager.windowRegistry?.activeWindow
 
-        // If this is the first window opening, set this as the active space for the browser manager
-        if browserManager.tabManager.currentSpace == nil, let space = targetSpace {
-            browserManager.tabManager.setActiveSpace(space)
+            guard let targetWindow else { return }
+
+            NSApp.activate(ignoringOtherApps: true)
+            targetWindow.window?.makeKeyAndOrderFront(nil)
+            targetWindow.window?.orderFrontRegardless()
+            browserManager.windowRegistry?.setActive(targetWindow)
+            browserManager.restoreWebViewFocus(in: targetWindow)
+        }
+    }
+
+    private func adoptIntoCurrentSpace(
+        session: MiniWindowSession,
+        preferredWindowId: UUID?,
+        fallbackSpaceId: UUID?
+    ) {
+        guard let browserManager else { return }
+
+        let targetSpace =
+            resolvedCurrentSpace(
+                preferredWindowId: preferredWindowId,
+                fallbackSpaceId: fallbackSpaceId
+            ) ?? browserManager.tabManager.spaces.first
+
+        resolveTargetWindow(preferredWindowId: preferredWindowId) { [weak self] targetWindow in
+            self?.open(session: session, in: targetSpace, targetWindow: targetWindow)
+        }
+    }
+
+    private func adopt(
+        session: MiniWindowSession,
+        intoSpaceId spaceId: UUID,
+        preferredWindowId: UUID?
+    ) {
+        guard let browserManager else { return }
+        let targetSpace = browserManager.tabManager.spaces.first(where: { $0.id == spaceId })
+
+        resolveTargetWindow(preferredWindowId: preferredWindowId) { [weak self] targetWindow in
+            self?.open(session: session, in: targetSpace, targetWindow: targetWindow)
+        }
+    }
+
+    private func open(
+        session: MiniWindowSession,
+        in targetSpace: Space?,
+        targetWindow: BrowserWindowState?
+    ) {
+        guard let browserManager else { return }
+
+        if let targetWindow, let targetSpace {
+            browserManager.setActiveSpace(targetSpace, in: targetWindow)
+            let newTab = browserManager.tabManager.createNewTab(
+                url: session.currentURL.absoluteString,
+                in: targetSpace
+            )
+            browserManager.selectTab(newTab, in: targetWindow)
+            targetWindow.window?.makeKeyAndOrderFront(nil)
+            targetWindow.window?.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
+        } else if let targetWindow {
+            _ = browserManager.createNewTab(in: targetWindow, url: session.currentURL.absoluteString)
+            targetWindow.window?.makeKeyAndOrderFront(nil)
+            targetWindow.window?.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            let newTab = browserManager.tabManager.createNewTab(
+                url: session.currentURL.absoluteString,
+                in: targetSpace
+            )
+            browserManager.tabManager.setActiveTab(newTab)
+            NSApp.activate(ignoringOtherApps: true)
         }
 
         sessions[session.id]?.controller.close()
@@ -324,12 +651,21 @@ final class MiniBrowserWindowController: NSWindowController, NSWindowDelegate {
     private let adoptAction: () -> Void
     private let onClose: (MiniWindowSession) -> Void
     private let gradientColorManager: GradientColorManager
+    private let requestedFrame: NSRect
+    private var keyMonitor: Any?
 
-    init(session: MiniWindowSession, adoptAction: @escaping () -> Void, onClose: @escaping (MiniWindowSession) -> Void, gradientColorManager: GradientColorManager) {
+    init(
+        session: MiniWindowSession,
+        adoptAction: @escaping () -> Void,
+        onClose: @escaping (MiniWindowSession) -> Void,
+        gradientColorManager: GradientColorManager,
+        sourceWindowFrame: NSRect?
+    ) {
         self.session = session
         self.adoptAction = adoptAction
         self.onClose = onClose
         self.gradientColorManager = gradientColorManager
+        self.requestedFrame = sourceWindowFrame ?? NSRect(x: 0, y: 0, width: 1180, height: 820)
 
         let contentView = MiniBrowserWindowView(
             session: session,
@@ -341,9 +677,11 @@ final class MiniBrowserWindowController: NSWindowController, NSWindowDelegate {
         )
         .environmentObject(gradientColorManager)
 
-        let hostingController = NSHostingController(rootView: contentView)
+        let hostingView = NSHostingView(rootView: contentView)
+        hostingView.frame = NSRect(origin: .zero, size: requestedFrame.size)
+        hostingView.autoresizingMask = [.width, .height]
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
+            contentRect: requestedFrame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -352,8 +690,15 @@ final class MiniBrowserWindowController: NSWindowController, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.center()
-        window.contentViewController = hostingController
+        window.minSize = NSSize(width: 760, height: 560)
+        window.standardWindowButton(.closeButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
+        window.contentView = hostingView
+        window.setFrame(requestedFrame, display: false)
+        if sourceWindowFrame == nil {
+            window.center()
+        }
 
         super.init(window: window)
 
@@ -366,10 +711,64 @@ final class MiniBrowserWindowController: NSWindowController, NSWindowDelegate {
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
+        window?.setFrame(requestedFrame, display: false)
         window?.makeKeyAndOrderFront(sender)
+        installKeyMonitorIfNeeded()
     }
 
     func windowWillClose(_ notification: Notification) {
+        removeKeyMonitor()
         onClose(session)
+    }
+
+    private func installKeyMonitorIfNeeded() {
+        guard keyMonitor == nil else { return }
+
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  let window = self.window,
+                  window.isKeyWindow else {
+                return event
+            }
+
+            let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard modifierFlags.isEmpty,
+                  let key = event.charactersIgnoringModifiers?.lowercased() else {
+                return event
+            }
+
+            switch key {
+            case "d":
+                self.closeWindow()
+                return nil
+            case "o":
+                adoptAction()
+                return nil
+            default:
+                if event.keyCode == 2 {
+                    self.closeWindow()
+                    return nil
+                }
+
+                if event.keyCode == 31 {
+                    adoptAction()
+                    return nil
+                }
+
+                return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+    }
+
+    private func closeWindow() {
+        guard let window else { return }
+        window.close()
     }
 }

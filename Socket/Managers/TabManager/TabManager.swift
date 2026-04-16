@@ -48,6 +48,8 @@ import OSLog
         let currentURLString: String?
         let canGoBack: Bool
         let canGoForward: Bool
+        let navigationHistory: [String]
+        let navigationHistoryIndex: Int
     }
 
     struct SnapshotFolder: Codable {
@@ -211,6 +213,8 @@ import OSLog
 
     // MARK: - Entity Ops
     private func upsertTab(in ctx: ModelContext, _ t: SnapshotTab, existing: TabEntity? = nil) throws {
+        let historyData = try encodeNavigationHistory(t.navigationHistory)
+
         if let e = existing {
             e.urlString = t.urlString
             e.name = t.name
@@ -224,6 +228,8 @@ import OSLog
             e.currentURLString = t.currentURLString
             e.canGoBack = t.canGoBack
             e.canGoForward = t.canGoForward
+            e.navigationHistoryData = historyData
+            e.navigationHistoryIndex = t.navigationHistoryIndex
         } else {
             let e = TabEntity(
                 id: t.id,
@@ -238,10 +244,18 @@ import OSLog
                 parentTabId: t.parentTabId,
                 currentURLString: t.currentURLString,
                 canGoBack: t.canGoBack,
-                canGoForward: t.canGoForward
+                canGoForward: t.canGoForward,
+                navigationHistoryData: historyData,
+                navigationHistoryIndex: t.navigationHistoryIndex
             )
             ctx.insert(e)
         }
+    }
+
+    private func encodeNavigationHistory(_ history: [String]) throws -> Data? {
+        let normalized = history.filter { !$0.isEmpty }
+        guard !normalized.isEmpty else { return nil }
+        return try JSONEncoder().encode(normalized)
     }
 
     private func upsertFolder(in ctx: ModelContext, _ f: SnapshotFolder, existing: FolderEntity? = nil) throws {
@@ -2073,8 +2087,17 @@ class TabManager: ObservableObject {
         // Restore navigation state
         t.canGoBack = e.canGoBack
         t.canGoForward = e.canGoForward
+        t.restoreNavigationHistory(
+            decodeNavigationHistory(from: e.navigationHistoryData),
+            currentIndex: e.navigationHistoryIndex
+        )
 
         return t
+    }
+
+    private func decodeNavigationHistory(from data: Data?) -> [String] {
+        guard let data else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
     }
 
     // MARK: - SwiftData load/save
@@ -2351,7 +2374,9 @@ class TabManager: ObservableObject {
                     parentTabId: t.parentTabId,
                     currentURLString: t.url.absoluteString,
                     canGoBack: t.canGoBack,
-                    canGoForward: t.canGoForward
+                    canGoForward: t.canGoForward,
+                    navigationHistory: t.navigationHistoryForPersistence,
+                    navigationHistoryIndex: t.navigationHistoryIndexForPersistence
                 ))
             }
         }
@@ -2374,7 +2399,9 @@ class TabManager: ObservableObject {
                     parentTabId: t.parentTabId,
                     currentURLString: t.url.absoluteString,
                     canGoBack: t.canGoBack,
-                    canGoForward: t.canGoForward
+                    canGoForward: t.canGoForward,
+                    navigationHistory: t.navigationHistoryForPersistence,
+                    navigationHistoryIndex: t.navigationHistoryIndexForPersistence
                 ))
             }
             // Regular tabs for this space
@@ -2394,7 +2421,9 @@ class TabManager: ObservableObject {
                     parentTabId: t.parentTabId,
                     currentURLString: t.url.absoluteString,
                     canGoBack: t.canGoBack,
-                    canGoForward: t.canGoForward
+                    canGoForward: t.canGoForward,
+                    navigationHistory: t.navigationHistoryForPersistence,
+                    navigationHistoryIndex: t.navigationHistoryIndexForPersistence
                 ))
             }
         }

@@ -263,7 +263,7 @@ class SocketSettingsService {
             sidebarPositionKey: SidebarPosition.left.rawValue,
             topBarAddressViewKey: true,
             sigmaCommandModeEnabledKey: true,
-            openExternalLinksInMiniWindowKey: false,
+            openExternalLinksInMiniWindowKey: true,
 
             geminiApiKeyKey: "",
             geminiModelKey: GeminiModel.flash.rawValue,
@@ -305,7 +305,7 @@ class SocketSettingsService {
         self.sidebarPosition = SidebarPosition(rawValue: userDefaults.string(forKey: sidebarPositionKey) ?? "left") ?? SidebarPosition.left
         self.topBarAddressView = userDefaults.object(forKey: topBarAddressViewKey) as? Bool ?? true
         self.sigmaCommandModeEnabled = userDefaults.object(forKey: sigmaCommandModeEnabledKey) as? Bool ?? true
-        self.openExternalLinksInMiniWindow = userDefaults.object(forKey: openExternalLinksInMiniWindowKey) as? Bool ?? false
+        self.openExternalLinksInMiniWindow = userDefaults.object(forKey: openExternalLinksInMiniWindowKey) as? Bool ?? true
         self.geminiApiKey = userDefaults.string(forKey: geminiApiKeyKey) ?? ""
         self.geminiModel = GeminiModel(rawValue: userDefaults.string(forKey: geminiModelKey) ?? GeminiModel.flash.rawValue) ?? .flash
         self.showAIAssistant = userDefaults.bool(forKey: showAIAssistantKey)

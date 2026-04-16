@@ -90,6 +90,10 @@ private struct WindowFocusBridge: NSViewRepresentable {
             self.window = window
             guard let window else { return }
 
+            Task { @MainActor in
+                self.windowState.window = window
+            }
+
             keyObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.didBecomeKeyNotification,
                 object: window,
@@ -112,6 +116,12 @@ private struct WindowFocusBridge: NSViewRepresentable {
             if let observer = keyObserver {
                 NotificationCenter.default.removeObserver(observer)
                 keyObserver = nil
+            }
+            let attachedWindow = window
+            Task { @MainActor in
+                if self.windowState.window === attachedWindow {
+                    self.windowState.window = nil
+                }
             }
             window = nil
         }

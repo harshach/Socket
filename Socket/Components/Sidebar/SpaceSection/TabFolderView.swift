@@ -152,9 +152,15 @@ struct TabFolderView: View {
             folderContextMenu
         }
         .onChange(of: nameFieldFocused) { _, focused in
+            windowState.isSidebarInlineEditing = isRenaming || focused
             // When losing focus during rename, commit
             if isRenaming && !focused {
                 commitRename()
+            }
+        }
+        .onDisappear {
+            if windowState.isSidebarInlineEditing {
+                windowState.isSidebarInlineEditing = false
             }
         }
     }
@@ -366,12 +372,14 @@ struct TabFolderView: View {
     private func startRenaming() {
         draftName = folder.name
         isRenaming = true
+        windowState.isSidebarInlineEditing = true
     }
 
     private func cancelRename() {
         isRenaming = false
         draftName = folder.name
         nameFieldFocused = false
+        windowState.isSidebarInlineEditing = false
     }
 
     private func commitRename() {
@@ -381,5 +389,6 @@ struct TabFolderView: View {
         }
         isRenaming = false
         nameFieldFocused = false
+        windowState.isSidebarInlineEditing = false
     }
 }

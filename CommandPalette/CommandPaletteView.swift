@@ -63,6 +63,13 @@ struct CommandPaletteView: View {
         }
     }
 
+    private func syncPaletteVisibility(_ isVisible: Bool) {
+        windowState.isCommandPaletteVisible = isVisible
+        if browserManager.windowRegistry?.activeWindow?.id == windowState.id {
+            browserManager.isCommandPaletteVisible = isVisible
+        }
+    }
+
     var body: some View {
         let isDark = colorScheme == .dark
         let isVisible = commandPalette.isVisible
@@ -263,6 +270,7 @@ struct CommandPaletteView: View {
         .allowsHitTesting(isVisible)
         .opacity(isVisible ? 1.0 : 0.0)
         .onChange(of: commandPalette.isVisible) { _, newVisible in
+            syncPaletteVisibility(newVisible)
             if newVisible {
                 searchManager.setTabManager(browserManager.tabManager)
                 searchManager.setHistoryManager(browserManager.historyManager)
@@ -287,6 +295,9 @@ struct CommandPaletteView: View {
                 activeSiteSearch = nil
                 selectedSuggestionIndex = -1
             }
+        }
+        .onAppear {
+            syncPaletteVisibility(commandPalette.isVisible)
         }
         .onChange(of: browserManager.currentProfile?.id) { _, _ in
             if commandPalette.isVisible {

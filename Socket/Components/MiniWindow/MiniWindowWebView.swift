@@ -391,12 +391,12 @@ extension MiniWindowWebView.Coordinator: WKUIDelegate {
         if navigationAction.targetFrame == nil {
             if let popupURL = navigationAction.request.url,
                popupURL.absoluteString != "about:blank" {
-                writeAuthTrace("reusing-miniwindow-webview action=load url=\(popupURL.absoluteString)")
+                writeAuthTrace("reusing-miniwindow-webview action=load-and-return-nil url=\(popupURL.absoluteString)")
                 webView.load(navigationAction.request)
             } else {
-                writeAuthTrace("reusing-miniwindow-webview action=return-existing-webview url=about:blank-or-nil")
+                writeAuthTrace("reusing-miniwindow-webview action=ignore-and-return-nil url=about:blank-or-nil")
             }
-            return webView
+            return nil
         }
         return nil
     }

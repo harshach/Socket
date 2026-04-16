@@ -119,7 +119,7 @@ struct WindowView: View {
         }
         // Lifecycle management
         .onAppear {
-            hoverSidebarManager.attach(browserManager: browserManager)
+            hoverSidebarManager.attach(browserManager: browserManager, windowState: windowState)
             hoverSidebarManager.windowRegistry = windowRegistry
             hoverSidebarManager.socketSettings = socketSettings
             hoverSidebarManager.start()

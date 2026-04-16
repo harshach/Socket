@@ -29,6 +29,7 @@ final class HoverSidebarManager: ObservableObject {
     weak var browserManager: BrowserManager?
     weak var windowRegistry: WindowRegistry?
     weak var socketSettings: SocketSettingsService?
+    weak var ownerWindowState: BrowserWindowState?
 
     // MARK: - Monitors
     private var globalMonitor: Any?
@@ -36,8 +37,9 @@ final class HoverSidebarManager: ObservableObject {
     private var isActive: Bool = false
 
     // MARK: - Lifecycle
-    func attach(browserManager: BrowserManager) {
+    func attach(browserManager: BrowserManager, windowState: BrowserWindowState) {
         self.browserManager = browserManager
+        self.ownerWindowState = windowState
     }
 
     func start() {
@@ -65,6 +67,22 @@ final class HoverSidebarManager: ObservableObject {
 
     deinit { stop() }
 
+    func refreshVisibility() {
+        scheduleHandleMouseMovement()
+    }
+
+    func revealFromHotspot() {
+        DispatchQueue.main.async { [weak self] in
+            self?.revealFromHotspotOnMain()
+        }
+    }
+
+    func dismissOverlay() {
+        DispatchQueue.main.async { [weak self] in
+            self?.setOverlayVisible(false, animated: false)
+        }
+    }
+
     // MARK: - Mouse Logic
     private func scheduleHandleMouseMovement() {
         // Ensure main-actor work since we touch NSApp/window and main-actor BrowserManager
@@ -74,23 +92,78 @@ final class HoverSidebarManager: ObservableObject {
     }
 
     @MainActor
-    private func handleMouseMovementOnMain() {
-        guard let bm = browserManager,
-              let registry = windowRegistry,
-              let activeState = registry.activeWindow else { return }
+    private func isOwnerWindowActive() -> Bool {
+        windowRegistry?.activeWindow?.id == ownerWindowState?.id
+    }
 
-        // Never show overlay while the real sidebar is visible
-        if activeState.isSidebarVisible {
-            if isOverlayVisible {
-                isOverlayVisible = false
+    @MainActor
+    private func isRealSidebarVisible() -> Bool {
+        guard let ownerWindowState else { return false }
+
+        if ownerWindowState.isSidebarVisible {
+            return true
+        }
+
+        return isOwnerWindowActive() && browserManager?.isSidebarVisible == true
+    }
+
+    @MainActor
+    private func shouldSuppressOverlay() -> Bool {
+        guard let ownerWindowState else { return true }
+
+        return !isOwnerWindowActive()
+            || isRealSidebarVisible()
+            || ownerWindowState.isFocusModeEnabled
+            || ownerWindowState.isSidebarMenuVisible
+            || ownerWindowState.isSidebarAIChatVisible
+            || ownerWindowState.isCommandPaletteVisible
+    }
+
+    @MainActor
+    private func setOverlayVisible(_ shouldShow: Bool, animated: Bool) {
+        guard shouldShow != isOverlayVisible else { return }
+
+        let update = {
+            self.isOverlayVisible = shouldShow
+        }
+
+        if animated {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                update()
             }
+        } else {
+            update()
+        }
+    }
+
+    @MainActor
+    private func revealFromHotspotOnMain() {
+        guard !shouldSuppressOverlay() else {
+            setOverlayVisible(false, animated: false)
             return
         }
 
-        guard let window = NSApp.keyWindow else {
-            if isOverlayVisible {
-                isOverlayVisible = false
-            }
+        setOverlayVisible(true, animated: true)
+    }
+
+    @MainActor
+    private func handleMouseMovementOnMain() {
+        guard browserManager != nil,
+              let registry = windowRegistry,
+              let ownerWindowState else { return }
+
+        guard registry.activeWindow?.id == ownerWindowState.id else {
+            setOverlayVisible(false, animated: false)
+            return
+        }
+
+        if shouldSuppressOverlay() {
+            setOverlayVisible(false, animated: false)
+            return
+        }
+
+        guard let window = ownerWindowState.window ?? NSApp.keyWindow else {
+            setOverlayVisible(false, animated: false)
             return
         }
 
@@ -101,14 +174,12 @@ final class HoverSidebarManager: ObservableObject {
         // Allow slight vertical overshoot
         let verticalOK = mouse.y >= frame.minY - verticalSlack && mouse.y <= frame.maxY + verticalSlack
         if !verticalOK {
-            if isOverlayVisible {
-                isOverlayVisible = false
-            }
+            setOverlayVisible(false, animated: false)
             return
         }
 
         // Use saved width when sidebar is collapsed to size the overlay and sticky zone
-        let overlayWidth = max(activeState.sidebarWidth, activeState.savedSidebarWidth)
+        let overlayWidth = max(ownerWindowState.sidebarWidth, ownerWindowState.savedSidebarWidth)
 
         // Edge zone calculation
         var inTriggerZone = false
@@ -133,10 +204,6 @@ final class HoverSidebarManager: ObservableObject {
         
         // Show sidebar if: in trigger zone, OR (sidebar visible AND (in keep-open zone OR over sidebar content))
         let shouldShow = inTriggerZone || (isOverlayVisible && (inKeepOpenZone || inSidebarContentZone))
-        if shouldShow != isOverlayVisible {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isOverlayVisible = shouldShow
-            }
-        }
+        setOverlayVisible(shouldShow, animated: true)
     }
 }
