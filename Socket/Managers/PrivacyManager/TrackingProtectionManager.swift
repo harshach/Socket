@@ -1020,6 +1020,27 @@ final class TrackingProtectionManager: ObservableObject {
         )
 
         return await Task.detached(priority: .utility) {
+            // Preferred path: in-process FFI into the shields_compiler static
+            // library. Same JSON contract as the subprocess path, no cargo
+            // at runtime, no Process spawn. Falls back to the subprocess
+            // path on ShieldsEngine error so operator mistakes (missing
+            // static lib, stale build) don't take Shields offline entirely.
+            do {
+                let inputData = try JSONEncoder().encode(input)
+                guard let inputJSON = String(data: inputData, encoding: .utf8) else {
+                    throw ShieldsEngineError.invalidInputEncoding
+                }
+                let result = try ShieldsEngine.shared.compile(rawJSON: inputJSON)
+                return RustCompilerOutput(
+                    rulesJSON: result.rulesJSON,
+                    totalRuleCount: result.totalRuleCount,
+                    networkRuleCount: result.networkRuleCount,
+                    cosmeticRuleCount: result.cosmeticRuleCount
+                )
+            } catch {
+                print("[Shields] in-process FFI failed (\(error.localizedDescription)); falling back to subprocess")
+            }
+
             do {
                 let executableURL = try Self.ensureRustHelperBinary()
                 let inputData = try JSONEncoder().encode(input)

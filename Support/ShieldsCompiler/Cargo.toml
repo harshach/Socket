@@ -1,9 +1,27 @@
 [package]
 name = "shields_compiler"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+
+[lib]
+# `staticlib` lets Xcode link a .a with C ABI for in-process calls from Swift.
+# `rlib` keeps the existing `main.rs` subprocess path buildable as a fallback.
+name = "shields_compiler"
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "shields_compiler"
+path = "src/main.rs"
 
 [dependencies]
 adblock = { version = "0.12.1", features = ["content-blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[profile.release]
+# Thin LTO + abort-on-panic shrinks the staticlib and avoids pulling in
+# Rust's unwinder (which wouldn't cross the C ABI cleanly anyway).
+lto = "thin"
+panic = "abort"
+codegen-units = 1
+strip = true

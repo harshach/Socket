@@ -1,0 +1,6 @@
+// Makes shields_compiler.h importable as a Swift module.
+module ShieldsCompilerFFI {
+    header "shields_compiler.h"
+    link "shields_compiler"
+    export *
+}

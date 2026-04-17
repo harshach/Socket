@@ -413,6 +413,12 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
+				);
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
 				INFOPLIST_FILE = Socket/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Socket;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -462,6 +468,12 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
+				);
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
 				INFOPLIST_FILE = Socket/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Socket;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
