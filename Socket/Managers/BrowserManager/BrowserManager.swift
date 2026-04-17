@@ -1576,6 +1576,19 @@ class BrowserManager: ObservableObject {
         }
     }
 
+    func openExtensionOptionsPage(_ extensionId: String) {
+        if #available(macOS 15.5, *) {
+            extensionManager?.openOptionsPage(for: extensionId)
+        }
+    }
+
+    func extensionHasOptionsPage(_ extensionId: String) -> Bool {
+        if #available(macOS 15.5, *) {
+            return extensionManager?.extensionHasOptionsPage(extensionId) ?? false
+        }
+        return false
+    }
+
     // MARK: - Window-Aware Tab Operations for Commands
 
     /// Get the current tab for the active window (used by keyboard shortcuts)

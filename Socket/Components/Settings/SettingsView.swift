@@ -1357,113 +1357,196 @@ private struct CategoryFilterChip: View {
 struct ExtensionsSettingsView: View {
     @EnvironmentObject var browserManager: BrowserManager
     @ObservedObject var extensionManager: ExtensionManager
-    @State private var showingInstallDialog = false
+
     @State private var safariExtensions: [ExtensionManager.SafariExtensionInfo] = []
     @State private var isScanningSafari = false
     @State private var showSafariSection = false
 
+    // Chrome Web Store paste / drag-drop install state
+    @State private var webStoreURLInput: String = ""
+    @State private var isWebStoreInstalling: Bool = false
+    @State private var installErrorMessage: String?
+    @State private var isDropTargeted: Bool = false
+
+    // Per-row UI state (permissions disclosure).
+    @State private var expandedRows: Set<String> = []
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if #available(macOS 15.5, *) {
-                // Extension management UI
-                HStack {
-                    Text("Installed Extensions")
-                        .font(.headline)
-                    Spacer()
-                    Button("Install Extension...") {
-                        browserManager.showExtensionInstallDialog()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-
+                header
                 Divider()
-
-                if extensionManager.installedExtensions.isEmpty && !showSafariSection {
-                    VStack(spacing: 12) {
-                        Image(systemName: "puzzlepiece.extension")
-                            .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("No Extensions Installed")
-                            .font(.title2)
-                            .fontWeight(.medium)
-                        Text(
-                            "Install browser extensions to enhance your browsing experience"
-                        )
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 12) {
-                            ForEach(
-                                extensionManager.installedExtensions,
-                                id: \.id
-                            ) { ext in
-                                ExtensionRowView(extension: ext)
-                                    .environmentObject(browserManager)
-                            }
-                        }
-                        .padding(.vertical)
-                    }
+                webStoreInstallRow
+                if let msg = installErrorMessage {
+                    Label(msg, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
-
-                // Safari Extensions Discovery
+                extensionListSection
                 Divider()
-
-                HStack {
-                    Text("Safari Extensions")
-                        .font(.headline)
-                    Spacer()
-                    if isScanningSafari {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Button("Scan for Safari Extensions") {
-                            scanForSafariExtensions()
-                        }
-                    }
-                }
-
-                if showSafariSection {
-                    if safariExtensions.isEmpty {
-                        Text("No Safari Web Extensions found on this Mac.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        LazyVStack(spacing: 8) {
-                            ForEach(safariExtensions) { ext in
-                                SafariExtensionRowView(
-                                    info: ext,
-                                    isAlreadyInstalled: extensionManager.installedExtensions.contains(where: {
-                                        $0.name == ext.name
-                                    }),
-                                    onInstall: {
-                                        installSafariExtension(ext)
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
+                safariDiscoverySection
             } else {
-                // Unsupported OS version
-                VStack(spacing: 12) {
-                    Image(systemName: "puzzlepiece.extension")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary)
-                    Text("Extensions Not Supported")
-                        .font(.title2)
-                        .fontWeight(.medium)
-                    Text("Extensions require macOS 15.5 or later")
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                unsupportedOSBlock
             }
         }
         .padding()
         .frame(minWidth: 520, minHeight: 360)
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
+        }
     }
+
+    // MARK: - Subviews
+
+    @available(macOS 15.5, *)
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Installed Extensions")
+                    .font(.headline)
+                Text("\(extensionManager.installedExtensions.count) installed · drop a .zip, .crx, or .appex anywhere in this panel")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Install from File…") {
+                browserManager.showExtensionInstallDialog()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    @available(macOS 15.5, *)
+    private var webStoreInstallRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "link")
+                .foregroundStyle(.secondary)
+            TextField(
+                "Paste Chrome Web Store URL or 32-char extension ID",
+                text: $webStoreURLInput
+            )
+            .textFieldStyle(.roundedBorder)
+            .disabled(isWebStoreInstalling)
+            .onSubmit { triggerWebStoreInstall() }
+
+            if isWebStoreInstalling {
+                ProgressView().controlSize(.small)
+            } else {
+                Button("Install") { triggerWebStoreInstall() }
+                    .buttonStyle(.bordered)
+                    .disabled(extractWebStoreExtensionId(webStoreURLInput) == nil)
+            }
+        }
+    }
+
+    @available(macOS 15.5, *)
+    private var extensionListSection: some View {
+        Group {
+            if extensionManager.installedExtensions.isEmpty {
+                dropZone
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(extensionManager.installedExtensions, id: \.id) { ext in
+                            ExtensionRowView(
+                                extension: ext,
+                                isExpanded: expandedRows.contains(ext.id),
+                                onToggleExpand: {
+                                    if expandedRows.contains(ext.id) {
+                                        expandedRows.remove(ext.id)
+                                    } else {
+                                        expandedRows.insert(ext.id)
+                                    }
+                                }
+                            )
+                            .environmentObject(browserManager)
+                        }
+                    }
+                    .padding(.vertical)
+                }
+            }
+        }
+    }
+
+    private var dropZone: some View {
+        VStack(spacing: 12) {
+            Image(systemName: isDropTargeted ? "tray.and.arrow.down.fill" : "puzzlepiece.extension")
+                .font(.system(size: 48))
+                .foregroundColor(isDropTargeted ? .accentColor : .secondary)
+            Text(isDropTargeted ? "Release to install" : "No Extensions Installed")
+                .font(.title3)
+                .fontWeight(.medium)
+            if !isDropTargeted {
+                Text("Drop a .zip, .crx, or .appex file anywhere in this panel, or paste a Chrome Web Store URL above.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(
+                    isDropTargeted ? Color.accentColor : Color.secondary.opacity(0.25),
+                    style: StrokeStyle(lineWidth: isDropTargeted ? 2 : 1, dash: [6, 4])
+                )
+        )
+        .animation(.easeInOut(duration: 0.15), value: isDropTargeted)
+    }
+
+    @available(macOS 15.5, *)
+    private var safariDiscoverySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Safari Extensions")
+                    .font(.headline)
+                Spacer()
+                if isScanningSafari {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Scan for Safari Extensions") { scanForSafariExtensions() }
+                }
+            }
+
+            if showSafariSection {
+                if safariExtensions.isEmpty {
+                    Text("No Safari Web Extensions found on this Mac.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    LazyVStack(spacing: 8) {
+                        ForEach(safariExtensions) { ext in
+                            SafariExtensionRowView(
+                                info: ext,
+                                isAlreadyInstalled: extensionManager.installedExtensions.contains(where: {
+                                    $0.name == ext.name
+                                }),
+                                onInstall: { installSafariExtension(ext) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var unsupportedOSBlock: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "puzzlepiece.extension")
+                .font(.system(size: 48))
+                .foregroundColor(.secondary)
+            Text("Extensions Not Supported")
+                .font(.title2)
+                .fontWeight(.medium)
+            Text("Extensions require macOS 15.5 or later")
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Actions
 
     private func scanForSafariExtensions() {
         isScanningSafari = true
@@ -1480,18 +1563,103 @@ struct ExtensionsSettingsView: View {
     private func installSafariExtension(_ info: ExtensionManager.SafariExtensionInfo) {
         extensionManager.installSafariExtension(info) { result in
             switch result {
-            case .success(let ext):
-                // Remove from available list since it's now installed
+            case .success:
                 safariExtensions.removeAll { $0.id == info.id }
-                _ = ext // suppress unused warning
             case .failure(let error):
-                let alert = NSAlert()
-                alert.messageText = "Failed to Install Safari Extension"
-                alert.informativeText = error.localizedDescription
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
+                presentInstallError(error.localizedDescription)
             }
+        }
+    }
+
+    /// Accept a Chrome Web Store URL or a bare 32-char extension id. The id is
+    /// the last non-empty path component for modern store URLs
+    /// (`.../detail/<slug>/<id>`) or the query param `id=` on legacy URLs.
+    /// Returns nil when the input doesn't look like either.
+    private func extractWebStoreExtensionId(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+
+        let idPattern = #"^[a-p]{32}$"#   // Chrome extension IDs are 32 chars of a-p
+        if trimmed.range(of: idPattern, options: .regularExpression) != nil {
+            return trimmed
+        }
+
+        guard let url = URL(string: trimmed), let host = url.host?.lowercased() else { return nil }
+        let isWebStoreHost = host.contains("chromewebstore.google.com")
+            || host.contains("chrome.google.com")
+            || host.contains("microsoftedge.microsoft.com")
+        guard isWebStoreHost else { return nil }
+
+        for component in url.pathComponents.reversed() {
+            if component.range(of: idPattern, options: .regularExpression) != nil {
+                return component
+            }
+        }
+        if let components = URLComponents(string: trimmed),
+           let item = components.queryItems?.first(where: { $0.name == "id" })?.value,
+           item.range(of: idPattern, options: .regularExpression) != nil {
+            return item
+        }
+        return nil
+    }
+
+    private func triggerWebStoreInstall() {
+        guard let id = extractWebStoreExtensionId(webStoreURLInput) else {
+            presentInstallError("Could not find a Chrome extension ID in that URL.")
+            return
+        }
+        installErrorMessage = nil
+        isWebStoreInstalling = true
+        extensionManager.installFromWebStore(extensionId: id) { result in
+            Task { @MainActor in
+                isWebStoreInstalling = false
+                switch result {
+                case .success:
+                    webStoreURLInput = ""
+                case .failure(let error):
+                    presentInstallError(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// File drop handler. Accepts the first file URL with a known extension
+    /// type. Drops with mixed or unsupported contents surface a user-visible
+    /// error rather than silently failing.
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        let supported: Set<String> = ["zip", "crx", "appex", "app"]
+        guard let provider = providers.first else { return false }
+
+        _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            Task { @MainActor in
+                guard let url else {
+                    presentInstallError("Unable to read dropped file.")
+                    return
+                }
+                let ext = url.pathExtension.lowercased()
+                if !supported.contains(ext) {
+                    presentInstallError("Unsupported file type \".\(ext)\". Expected .zip, .crx, .appex, or .app.")
+                    return
+                }
+                installErrorMessage = nil
+                extensionManager.installExtension(from: url) { result in
+                    Task { @MainActor in
+                        if case .failure(let error) = result {
+                            presentInstallError(error.localizedDescription)
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private func presentInstallError(_ message: String) {
+        installErrorMessage = message
+        // Auto-clear after a few seconds so the UI doesn't stay noisy.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            if installErrorMessage == message { installErrorMessage = nil }
         }
     }
 }
@@ -1541,27 +1709,37 @@ struct SafariExtensionRowView: View {
 
 struct ExtensionRowView: View {
     let `extension`: InstalledExtension
+    var isExpanded: Bool = false
+    var onToggleExpand: (() -> Void)? = nil
+
     @EnvironmentObject var browserManager: BrowserManager
+    @State private var showingUninstallConfirm: Bool = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Extension icon
-            Group {
-                if let iconPath = `extension`.iconPath,
-                    let nsImage = NSImage(contentsOfFile: iconPath)
-                {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                } else {
-                    Image(systemName: "puzzlepiece.extension")
-                        .foregroundColor(.blue)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            mainRow
+            if isExpanded {
+                Divider().padding(.vertical, 8)
+                permissionsBlock
             }
-            .frame(width: 32, height: 32)
-            .background(Color(.controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(12)
+        .background(Color(.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .alert("Remove \(`extension`.name)?", isPresented: $showingUninstallConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button("Remove", role: .destructive) {
+                browserManager.uninstallExtension(`extension`.id)
+            }
+        } message: {
+            Text("This will delete the extension's files and storage from this device. Other browsers are unaffected.")
+        }
+    }
 
-            // Extension info
+    private var mainRow: some View {
+        HStack(spacing: 12) {
+            iconView
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(`extension`.name)
                     .font(.headline)
@@ -1571,11 +1749,11 @@ struct ExtensionRowView: View {
                     Text("v\(`extension`.version)")
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    if let description = `extension`.description {
-                        Text("•")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    Text("MV\(`extension`.manifestVersion)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if let description = `extension`.description, !description.isEmpty {
+                        Text("•").font(.caption).foregroundColor(.secondary)
                         Text(description)
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -1586,33 +1764,115 @@ struct ExtensionRowView: View {
 
             Spacer()
 
-            // Controls
-            HStack(spacing: 8) {
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { `extension`.isEnabled },
-                        set: { isEnabled in
-                            if isEnabled {
-                                browserManager.enableExtension(`extension`.id)
-                            } else {
-                                browserManager.disableExtension(`extension`.id)
-                            }
-                        }
-                    )
-                )
-                .toggleStyle(.switch)
+            controls
+        }
+    }
 
-                Button("Remove") {
-                    browserManager.uninstallExtension(`extension`.id)
-                }
-                .buttonStyle(.bordered)
-                .foregroundColor(.red)
+    private var iconView: some View {
+        Group {
+            if let iconPath = `extension`.iconPath,
+               let nsImage = NSImage(contentsOfFile: iconPath) {
+                Image(nsImage: nsImage).resizable()
+            } else {
+                Image(systemName: "puzzlepiece.extension")
+                    .foregroundColor(.blue)
             }
         }
-        .padding(12)
+        .frame(width: 32, height: 32)
         .background(Color(.controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var controls: some View {
+        HStack(spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { `extension`.isEnabled },
+                set: { isEnabled in
+                    if isEnabled {
+                        browserManager.enableExtension(`extension`.id)
+                    } else {
+                        browserManager.disableExtension(`extension`.id)
+                    }
+                }
+            ))
+            .toggleStyle(.switch)
+            .help(`extension`.isEnabled ? "Disable extension" : "Enable extension")
+
+            if browserManager.extensionHasOptionsPage(`extension`.id) {
+                Button {
+                    browserManager.openExtensionOptionsPage(`extension`.id)
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.bordered)
+                .help("Open extension options page")
+            }
+
+            if onToggleExpand != nil {
+                Button {
+                    onToggleExpand?()
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                }
+                .buttonStyle(.bordered)
+                .help(isExpanded ? "Hide permissions" : "Show permissions")
+            }
+
+            Button {
+                showingUninstallConfirm = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.bordered)
+            .foregroundColor(.red)
+            .help("Remove extension")
+        }
+    }
+
+    private var permissionsBlock: some View {
+        let permissions = (`extension`.manifest["permissions"] as? [String]) ?? []
+        let hostPermissions = (`extension`.manifest["host_permissions"] as? [String]) ?? []
+        let optionalPermissions = (`extension`.manifest["optional_permissions"] as? [String]) ?? []
+
+        return VStack(alignment: .leading, spacing: 6) {
+            permissionRow(title: "Permissions", values: permissions)
+            permissionRow(title: "Host access", values: hostPermissions)
+            if !optionalPermissions.isEmpty {
+                permissionRow(title: "Optional", values: optionalPermissions)
+            }
+            HStack(spacing: 8) {
+                Text("ID")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 80, alignment: .leading)
+                Text(`extension`.id)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func permissionRow(title: String, values: [String]) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            if values.isEmpty {
+                Text("None")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text(values.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
     }
 }
 

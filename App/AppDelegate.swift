@@ -268,6 +268,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             manager.cleanupAllTabs()
             AppDelegate.log.info("Cleanup completed; WKWebView processes terminated")
 
+            // Phase 3b: Tear down the extension subsystem while we're still on
+            // MainActor. deinit can't safely unload WKWebExtensionContexts.
+            if #available(macOS 15.4, *) {
+                ExtensionManager.shared.shutdownSync()
+            }
+
             let total = CFAbsoluteTimeGetCurrent() - overallStart
             AppDelegate.log.info(
                 "Termination task finished in \(String(format: "%.3f", total))s; replying to terminate"

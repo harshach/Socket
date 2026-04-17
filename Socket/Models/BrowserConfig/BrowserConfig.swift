@@ -73,10 +73,24 @@ class BrowserConfiguration {
     // Creates a fresh WKUserContentController but preserves shared user scripts
     // (e.g., extension bridge scripts). This avoids cross-tab handler conflicts
     // while keeping scripts that must be present on every tab.
+    //
+    // Also registers the SocketShimBridge on the fresh controller so the
+    // `window.webkit.messageHandlers.socketShimBridge` channel is reachable
+    // from any tab/extension webview derived from the shared config. Script
+    // message handlers are not enumerable and therefore cannot be carried
+    // over from the shared UCC automatically — each fresh UCC must register
+    // its own.
     func freshUserContentController() -> WKUserContentController {
         let controller = WKUserContentController()
         for script in webViewConfiguration.userContentController.userScripts {
             controller.addUserScript(script)
+        }
+        if #available(macOS 15.4, *) {
+            controller.addScriptMessageHandler(
+                SocketShimBridge.shared,
+                contentWorld: .page,
+                name: SocketShimBridge.handlerName
+            )
         }
         return controller
     }

@@ -31,10 +31,14 @@ final class ExtensionManager: NSObject, ObservableObject,
     private var extensionController: WKWebExtensionController?
     private var extensionContexts: [String: WKWebExtensionContext] = [:]
     private var actionAnchors: [String: [WeakAnchor]] = [:]
+    private var shimUserScriptsInstalled = false
     /// MEMORY LEAK FIX: Store observer tokens so they can be removed when anchors change
     private var anchorObserverTokens: [String: [Any]] = [:]
-    // Keep options windows alive per extension id
+    // Keep options windows alive per extension id, with a paired
+    // willCloseNotification observer so the entries don't leak when the user
+    // closes the window.
     private var optionsWindows: [String: NSWindow] = [:]
+    private var optionsWindowObservers: [String: NSObjectProtocol] = [:]
     // Stable adapters for tabs/windows used when notifying controller events
     private var tabAdapters: [UUID: ExtensionTabAdapter] = [:]
     internal var windowAdapter: ExtensionWindowAdapter?
@@ -63,47 +67,56 @@ final class ExtensionManager: NSObject, ObservableObject,
     }
 
     deinit {
+        // ExtensionManager.shared is a singleton that lives for the whole
+        // process, so this almost never runs. When it does (test harnesses,
+        // future de-singleton-ization), keep it best-effort and synchronous.
+        //
+        // We deliberately do NOT spawn `Task { @MainActor in ... }` from
+        // deinit: the task may outlive `self` and runs on a stack with no
+        // ownership of the captured `controller`/`contexts`, so observers and
+        // delegates may have been torn down by the time it fires. Anything
+        // that needs MainActor coordination must use `shutdownSync()` from
+        // the app lifecycle (e.g. applicationWillTerminate), not deinit.
         NotificationCenter.default.removeObserver(self)
-
-        // Capture state for cleanup before we tear down references
-        let contexts = extensionContexts
-        let controller = extensionController
-
-        // MEMORY LEAK FIX: Clean up all extension contexts and break circular references
-        tabAdapters.removeAll()
-        actionAnchors.removeAll()
-
-        // MEMORY LEAK FIX: Remove all stored notification observer tokens
         for (_, tokens) in anchorObserverTokens {
-            for token in tokens {
-                NotificationCenter.default.removeObserver(token)
-            }
+            for token in tokens { NotificationCenter.default.removeObserver(token) }
         }
         anchorObserverTokens.removeAll()
+        optionsWindowObservers.removeAll()
+        Self.logger.info("ExtensionManager deinit (singleton teardown)")
+    }
 
-        // Close all options windows
-        for (_, window) in optionsWindows {
-            Task { @MainActor in
-                window.close()
-            }
-        }
+    /// Coordinated shutdown that callers (e.g. `AppDelegate.applicationWillTerminate`)
+    /// run while still on the main actor. Unlike `deinit` this can safely
+    /// touch `WKWebExtensionController.unload` and main-actor state.
+    @MainActor
+    func shutdownSync() {
+        // Close options windows first so their delegates don't race with
+        // controller teardown.
+        for (_, window) in optionsWindows { window.close() }
         optionsWindows.removeAll()
+        for (_, token) in optionsWindowObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        optionsWindowObservers.removeAll()
 
-        // Clean up window adapter
+        for (_, tokens) in anchorObserverTokens {
+            for token in tokens { NotificationCenter.default.removeObserver(token) }
+        }
+        anchorObserverTokens.removeAll()
+        actionAnchors.removeAll()
+        tabAdapters.removeAll()
         windowAdapter = nil
 
-        // Unload extension controller contexts asynchronously on the main actor
-        if let controller {
-            Task { @MainActor in
-                for (_, context) in contexts {
-                    try? controller.unload(context)
-                }
+        if let controller = extensionController {
+            for (_, context) in extensionContexts {
+                try? controller.unload(context)
             }
         }
-        extensionController = nil
         extensionContexts.removeAll()
+        extensionController = nil
 
-        Self.logger.info("Cleaned up all extension resources")
+        Self.logger.info("ExtensionManager shutdownSync complete")
     }
 
     // MARK: - Setup
@@ -181,6 +194,72 @@ final class ExtensionManager: NSObject, ObservableObject,
         }
 
         Self.logger.info("Native WKWebExtensionController initialized and configured")
+
+        registerShimsIfNeeded()
+        installShimUserScriptsIfNeeded()
+    }
+
+    // MARK: - Chrome.* Shim Layer
+
+    /// Register the default set of shims with `SocketShimRouter`. Idempotent —
+    /// safe to call more than once (each register replaces the prior entry for
+    /// a given namespace).
+    private func registerShimsIfNeeded() {
+        if #available(macOS 15.4, *) {
+            // Management is the only shim that lands with the initial wiring;
+            // subsequent shims (sidePanel, tabGroups, proxy, identity) register
+            // themselves here as they come online.
+            SocketShimRouter.shared.register(ManagementShim(extensionManager: self))
+        }
+    }
+
+    /// Inject the shim installer JS and the namespace-advertisement script
+    /// into the shared `WKUserContentController`. The installer is a no-op on
+    /// normal pages — it exits when neither `chrome` nor `browser` is defined
+    /// — so it is safe to install globally.
+    private func installShimUserScriptsIfNeeded() {
+        guard !shimUserScriptsInstalled else { return }
+        shimUserScriptsInstalled = true
+
+        let ucc = BrowserConfiguration.shared.webViewConfiguration.userContentController
+
+        if #available(macOS 15.4, *) {
+            let namespaces = SocketShimRouter.shared.registeredNamespaces
+            let namespacesJSON: String
+            if let data = try? JSONSerialization.data(withJSONObject: namespaces),
+               let str = String(data: data, encoding: .utf8) {
+                namespacesJSON = str
+            } else {
+                namespacesJSON = "[]"
+            }
+
+            // Advertisement script runs BEFORE the installer so the installer
+            // can read `window.__socketShimNamespaces`. Keep it tiny — this
+            // runs on every page.
+            let advertiseJS = "window.__socketShimNamespaces = \(namespacesJSON);"
+            ucc.addUserScript(WKUserScript(
+                source: advertiseJS,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            ))
+
+            ucc.addUserScript(WKUserScript(
+                source: SocketShimBridge.installerJS,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            ))
+
+            // Also register the bridge handler on the shared UCC itself —
+            // webviews created directly from it (without going through
+            // `freshUserContentController`) still need the channel.
+            ucc.addScriptMessageHandler(
+                SocketShimBridge.shared,
+                contentWorld: .page,
+                name: SocketShimBridge.handlerName
+            )
+
+            Self.logger.info("Shim installer registered for namespaces: \(namespaces.joined(separator: ", "), privacy: .public)")
+        }
     }
 
     // MARK: - Externally Connectable Bridge
@@ -1438,7 +1517,10 @@ final class ExtensionManager: NSObject, ObservableObject,
             completionHandler(.failure(.unsupportedOS))
             return
         }
-        
+
+        ExtensionTelemetry.shared.record(.installStarted,
+                                        context: ["source": url.lastPathComponent])
+
         Task {
             do {
                 let installedExtension = try await performInstallation(
@@ -1446,14 +1528,30 @@ final class ExtensionManager: NSObject, ObservableObject,
                 )
                 await MainActor.run {
                     self.installedExtensions.append(installedExtension)
+                    ExtensionTelemetry.shared.record(
+                        .installSucceeded,
+                        extensionId: installedExtension.id,
+                        extensionName: installedExtension.name,
+                        context: ["version": installedExtension.version,
+                                  "mv": String(installedExtension.manifestVersion)])
                     completionHandler(.success(installedExtension))
                 }
             } catch let error as ExtensionError {
                 await MainActor.run {
+                    ExtensionTelemetry.shared.record(
+                        .installFailed,
+                        severity: .error,
+                        message: error.localizedDescription,
+                        context: ["source": url.lastPathComponent])
                     completionHandler(.failure(error))
                 }
             } catch {
                 await MainActor.run {
+                    ExtensionTelemetry.shared.record(
+                        .installFailed,
+                        severity: .error,
+                        message: error.localizedDescription,
+                        context: ["source": url.lastPathComponent])
                     completionHandler(
                         .failure(
                             .installationFailed(error.localizedDescription)
@@ -1559,11 +1657,22 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         // Start the background service worker so it can handle
         // messages from popup and content scripts.
+        let displayNameForTelemetry = tempExtension.displayName ?? manifest["name"] as? String
         extensionContext.loadBackgroundContent { [weak self] error in
             if let error {
                 Self.logger.error("Background load failed for new extension: \(error.localizedDescription, privacy: .public)")
+                ExtensionTelemetry.shared.record(
+                    .backgroundFailed,
+                    severity: .error,
+                    extensionId: extensionId,
+                    extensionName: displayNameForTelemetry,
+                    message: error.localizedDescription)
             } else {
                 Self.logger.info("Background content loaded for new extension")
+                ExtensionTelemetry.shared.record(
+                    .backgroundStarted,
+                    extensionId: extensionId,
+                    extensionName: displayNameForTelemetry)
                 self?.probeBackgroundHealth(for: extensionContext, name: "new extension")
             }
         }
@@ -1699,21 +1808,179 @@ final class ExtensionManager: NSObject, ObservableObject,
         return installedExtension
     }
 
+    /// Extract a zip into `destinationURL`, refusing any archive that tries to
+    /// escape the destination via `..`, absolute paths, or symbolic links.
+    ///
+    /// The check has three layers, in order of cost:
+    ///   1. List the archive with `unzip -Z1` and reject any entry whose
+    ///      normalized path leaves the destination root.
+    ///   2. Run the extraction.
+    ///   3. After extraction, walk the directory and refuse if any symlink
+    ///      resolves outside the destination root.
     private func extractZip(from zipURL: URL, to destinationURL: URL)
         async throws
     {
+        // STEP 1: list and validate every entry path.
+        try validateZipContents(at: zipURL)
+
+        // STEP 2: extract. Pass `--` to terminate options so a zip path
+        // starting with `-` can't be misinterpreted as a flag.
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        task.arguments = ["-q", zipURL.path, "-d", destinationURL.path]
+        task.arguments = ["-q", "--", zipURL.path, "-d", destinationURL.path]
 
-        try task.run()
+        do {
+            try task.run()
+        } catch {
+            throw ExtensionError.installationFailed(
+                "Failed to launch unzip: \(error.localizedDescription)"
+            )
+        }
         task.waitUntilExit()
 
         if task.terminationStatus != 0 {
+            // Best-effort cleanup of partial extraction.
+            try? FileManager.default.removeItem(at: destinationURL)
             throw ExtensionError.installationFailed(
-                "Failed to extract ZIP file"
+                "Failed to extract ZIP file (unzip exit code \(task.terminationStatus))"
             )
         }
+
+        // STEP 3: post-extraction symlink sweep.
+        do {
+            try rejectEscapingSymlinks(in: destinationURL)
+        } catch {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
+        }
+
+        // STEP 4: enforce overall package size limit.
+        let totalBytes = directorySizeBytes(at: destinationURL)
+        if totalBytes > ExtensionUtils.maxExtensionSizeBytes {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw ExtensionError.packageRejected(
+                "Extension exceeds maximum size (\(totalBytes) bytes; limit \(ExtensionUtils.maxExtensionSizeBytes))"
+            )
+        }
+    }
+
+    /// Run `unzip -Z1` to enumerate archive entries and verify each one stays
+    /// inside the intended destination once normalized. Throws on any entry
+    /// that uses absolute paths or `..` traversal.
+    private func validateZipContents(at zipURL: URL) throws {
+        let lister = Process()
+        lister.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        lister.arguments = ["-Z1", "--", zipURL.path]
+
+        let pipe = Pipe()
+        lister.standardOutput = pipe
+        lister.standardError = Pipe()
+
+        do {
+            try lister.run()
+        } catch {
+            throw ExtensionError.packageRejected(
+                "Failed to inspect zip: \(error.localizedDescription)"
+            )
+        }
+        lister.waitUntilExit()
+
+        guard lister.terminationStatus == 0 else {
+            throw ExtensionError.packageRejected(
+                "Unable to enumerate zip contents (unzip exit \(lister.terminationStatus))"
+            )
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let listing = String(data: data, encoding: .utf8) else {
+            throw ExtensionError.packageRejected("Zip listing is not valid UTF-8")
+        }
+
+        for rawEntry in listing.split(separator: "\n", omittingEmptySubsequences: true) {
+            let entry = String(rawEntry).trimmingCharacters(in: .whitespacesAndNewlines)
+            if entry.isEmpty { continue }
+
+            // Reject absolute paths outright.
+            if entry.hasPrefix("/") {
+                ExtensionTelemetry.shared.record(.zipRejected,
+                                                severity: .error,
+                                                message: "absolute path in zip",
+                                                context: ["entry": entry])
+                throw ExtensionError.packageRejected(
+                    "Zip contains absolute path: \(entry)"
+                )
+            }
+
+            // Walk components and reject any `..` traversal. We also reject
+            // any embedded null character — unzip would, but we're explicit.
+            if entry.contains("\u{0000}") {
+                throw ExtensionError.packageRejected("Zip entry contains null byte")
+            }
+            let components = entry.split(separator: "/", omittingEmptySubsequences: false)
+            for component in components {
+                if component == ".." {
+                    ExtensionTelemetry.shared.record(.zipRejected,
+                                                    severity: .error,
+                                                    message: "path traversal in zip",
+                                                    context: ["entry": entry])
+                    throw ExtensionError.packageRejected(
+                        "Zip contains path-traversal entry: \(entry)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// After extraction, refuse the package if any symbolic link points
+    /// outside `root`. The check resolves links via `URL.resolvingSymlinksInPath`
+    /// and compares standardized paths.
+    private func rejectEscapingSymlinks(in root: URL) throws {
+        let standardizedRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = standardizedRoot.path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isSymbolicLinkKey],
+            options: []
+        ) else { return }
+
+        for case let fileURL as URL in enumerator {
+            let resourceValues = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard resourceValues?.isSymbolicLink == true else { continue }
+            let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL.path
+            if resolved != rootPath && !resolved.hasPrefix(prefix) {
+                ExtensionTelemetry.shared.record(.zipRejected,
+                                                severity: .error,
+                                                message: "symlink escapes extension dir",
+                                                context: ["link": fileURL.path,
+                                                          "target": resolved])
+                throw ExtensionError.packageRejected(
+                    "Extension contains symbolic link that escapes its directory: \(fileURL.lastPathComponent)"
+                )
+            }
+        }
+    }
+
+    /// Sum file sizes under `root`. Returns 0 on enumeration error rather than
+    /// throwing — failures here aren't security-relevant, the caller compares
+    /// against a soft limit.
+    private func directorySizeBytes(at root: URL) -> Int64 {
+        var total: Int64 = 0
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileSizeKey],
+            options: []
+        ) else { return 0 }
+        for case let fileURL as URL in enumerator {
+            let values = try? fileURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey])
+            if let allocated = values?.totalFileAllocatedSize {
+                total += Int64(allocated)
+            } else if let size = values?.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
     }
 
     /// Resolve the web extension resources directory from a Safari .appex or .app bundle.
@@ -1788,30 +2055,61 @@ final class ExtensionManager: NSObject, ObservableObject,
 
     func enableExtension(_ extensionId: String) {
         guard let context = extensionContexts[extensionId] else { return }
+        let name = installedExtensions.first(where: { $0.id == extensionId })?.name
 
         do {
             try extensionController?.load(context)
             updateExtensionEnabled(extensionId, enabled: true)
+            ExtensionTelemetry.shared.record(.loaded,
+                                            extensionId: extensionId,
+                                            extensionName: name)
 
             // Start the background service worker
             context.loadBackgroundContent { error in
                 if let error {
                     Self.logger.error("Background load failed on enable: \(error.localizedDescription, privacy: .public)")
+                    ExtensionTelemetry.shared.record(
+                        .backgroundFailed,
+                        severity: .error,
+                        extensionId: extensionId,
+                        extensionName: name,
+                        message: error.localizedDescription)
+                } else {
+                    ExtensionTelemetry.shared.record(
+                        .backgroundStarted,
+                        extensionId: extensionId,
+                        extensionName: name)
                 }
             }
         } catch {
             Self.logger.error("Failed to enable extension: \(error.localizedDescription, privacy: .public)")
+            ExtensionTelemetry.shared.record(
+                .shimCallFailed,
+                severity: .error,
+                extensionId: extensionId,
+                extensionName: name,
+                message: "enable failed: \(error.localizedDescription)")
         }
     }
 
     func disableExtension(_ extensionId: String) {
         guard let context = extensionContexts[extensionId] else { return }
+        let name = installedExtensions.first(where: { $0.id == extensionId })?.name
 
         do {
             try extensionController?.unload(context)
             updateExtensionEnabled(extensionId, enabled: false)
+            ExtensionTelemetry.shared.record(.unloaded,
+                                            extensionId: extensionId,
+                                            extensionName: name)
         } catch {
             Self.logger.error("Failed to disable extension: \(error.localizedDescription, privacy: .public)")
+            ExtensionTelemetry.shared.record(
+                .shimCallFailed,
+                severity: .error,
+                extensionId: extensionId,
+                extensionName: name,
+                message: "disable failed: \(error.localizedDescription)")
         }
     }
 
@@ -1850,36 +2148,130 @@ final class ExtensionManager: NSObject, ObservableObject,
         Self.logger.info("Re-enabled extensions complete")
     }
 
+    /// Full-fidelity uninstall. Each step is independent and logs on failure
+    /// rather than aborting the sequence — a failure to remove anchor
+    /// observers must not prevent the package files from being deleted.
+    ///
+    /// Order matters:
+    ///   1. Close options window + drop its observer.
+    ///   2. Drop action anchors and the paired NotificationCenter tokens.
+    ///   3. Unload the WKWebExtensionContext (may trigger port disconnect,
+    ///      which releases NativeMessagingHandler strong refs).
+    ///   4. Delete package directory from disk.
+    ///   5. Delete SwiftData row.
+    ///   6. Drop the runtime model.
     func uninstallExtension(_ extensionId: String) {
-        if let context = extensionContexts[extensionId] {
-            do {
-                try extensionController?.unload(context)
-            } catch {
-                Self.logger.error("Failed to unload extension context: \(error.localizedDescription, privacy: .public)")
-            }
-            extensionContexts.removeValue(forKey: extensionId)
+        let name = installedExtensions.first(where: { $0.id == extensionId })?.name
+        ExtensionTelemetry.shared.record(.uninstallStarted,
+                                        extensionId: extensionId,
+                                        extensionName: name)
+
+        // 1. Options window + its close observer.
+        if let window = optionsWindows.removeValue(forKey: extensionId) {
+            window.close()
+        }
+        if let token = optionsWindowObservers.removeValue(forKey: extensionId) {
+            NotificationCenter.default.removeObserver(token)
         }
 
-        // Remove from database and filesystem
+        // 2. Action anchors and their frame-change observers.
+        actionAnchors.removeValue(forKey: extensionId)
+        if let tokens = anchorObserverTokens.removeValue(forKey: extensionId) {
+            for token in tokens {
+                NotificationCenter.default.removeObserver(token)
+            }
+        }
+
+        // 3. Unload the context. We keep going even if unload throws — the
+        // context may already be unloaded, or the controller may be torn down.
+        if let context = extensionContexts.removeValue(forKey: extensionId) {
+            do {
+                try extensionController?.unload(context)
+                ExtensionTelemetry.shared.record(.unloaded,
+                                                extensionId: extensionId,
+                                                extensionName: name)
+            } catch {
+                Self.logger.error("Failed to unload extension context during uninstall: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        // 4. Delete package directory. Best-effort but logged.
+        let entities: [ExtensionEntity]
         do {
             let id = extensionId
             let predicate = #Predicate<ExtensionEntity> { $0.id == id }
-            let entities = try self.context.fetch(
+            entities = try self.context.fetch(
                 FetchDescriptor<ExtensionEntity>(predicate: predicate)
             )
-
-            for entity in entities {
-                let packageURL = URL(fileURLWithPath: entity.packagePath)
-                try? FileManager.default.removeItem(at: packageURL)
-                self.context.delete(entity)
-            }
-
-            try self.context.save()
-
-            installedExtensions.removeAll { $0.id == extensionId }
         } catch {
-            Self.logger.error("Failed to uninstall extension: \(error.localizedDescription, privacy: .public)")
+            entities = []
+            Self.logger.error("Failed to fetch extension entity for uninstall: \(error.localizedDescription, privacy: .public)")
         }
+
+        for entity in entities {
+            let packageURL = URL(fileURLWithPath: entity.packagePath)
+            do {
+                if FileManager.default.fileExists(atPath: packageURL.path) {
+                    try FileManager.default.removeItem(at: packageURL)
+                }
+            } catch {
+                Self.logger.error("Failed to remove extension package at \(entity.packagePath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+            self.context.delete(entity)
+        }
+
+        // 5. Persist the SwiftData delete.
+        do {
+            try self.context.save()
+        } catch {
+            Self.logger.error("Failed to save context after uninstall delete: \(error.localizedDescription, privacy: .public)")
+            ExtensionTelemetry.shared.record(.uninstallFailed,
+                                            severity: .error,
+                                            extensionId: extensionId,
+                                            extensionName: name,
+                                            message: error.localizedDescription)
+            return
+        }
+
+        // 6. Drop the runtime model.
+        installedExtensions.removeAll { $0.id == extensionId }
+
+        ExtensionTelemetry.shared.record(.uninstallSucceeded,
+                                        extensionId: extensionId,
+                                        extensionName: name)
+    }
+
+    /// Open the extension's options page (the user-facing entry; WebKit also
+    /// calls this flow via `webExtensionController(_:openOptionsPageFor:...)`).
+    /// No-op if the extension id is unknown or the extension doesn't declare
+    /// an options page.
+    @available(macOS 15.5, *)
+    func openOptionsPage(for extensionId: String) {
+        guard let context = extensionContexts[extensionId],
+              let controller = extensionController else { return }
+        webExtensionController(
+            controller,
+            openOptionsPageFor: context,
+            completionHandler: { error in
+                if let error {
+                    Self.logger.error("openOptionsPage failed for \(extensionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        )
+    }
+
+    /// True when the extension declares an options page. Used by Settings UI
+    /// to decide whether to show the "Options" button.
+    func extensionHasOptionsPage(_ extensionId: String) -> Bool {
+        guard let ext = installedExtensions.first(where: { $0.id == extensionId }) else { return false }
+        if let ui = ext.manifest["options_ui"] as? [String: Any],
+           let page = ui["page"] as? String, !page.isEmpty {
+            return true
+        }
+        if let page = ext.manifest["options_page"] as? String, !page.isEmpty {
+            return true
+        }
+        return false
     }
 
     private func updateExtensionEnabled(_ extensionId: String, enabled: Bool) {
@@ -3150,15 +3542,27 @@ final class ExtensionManager: NSObject, ObservableObject,
                 isDirectory: true
             )
 
-            // SECURITY FIX: Normalize paths to prevent path traversal attacks
-            let normalizedExtensionRoot = extensionRoot.standardizedFileURL
-            let normalizedOptionsURL = optionsURL.standardizedFileURL
+            // Normalize both URLs, then compare using path-component boundaries.
+            // String hasPrefix is NOT safe here — "/Library/.../abc" is a valid
+            // prefix of "/Library/.../abcd/options.html". We resolve symlinks
+            // and then check that the options path is either equal to the
+            // extension root or starts with `root + "/"`.
+            let normalizedExtensionRoot = extensionRoot
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+            let normalizedOptionsURL = optionsURL
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
 
-            // Check if options URL is within the extension directory (prevent path traversal)
-            if !normalizedOptionsURL.path.hasPrefix(
-                normalizedExtensionRoot.path
-            ) {
-                Self.logger.debug("   Extension root: \(normalizedExtensionRoot.path)")
+            let rootPath = normalizedExtensionRoot.path
+            let optionsPath = normalizedOptionsURL.path
+            let rootPrefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+            let isInsideRoot = optionsPath == rootPath || optionsPath.hasPrefix(rootPrefix)
+            if !isInsideRoot {
+                Self.logger.error("SECURITY: options URL escapes extension dir: options=\(optionsPath) root=\(rootPath)")
+                ExtensionTelemetry.shared.record(.shimCallFailed,
+                                                severity: .error,
+                                                message: "options URL escapes extension dir")
                 completionHandler(
                     NSError(
                         domain: "ExtensionManager",
@@ -3172,14 +3576,11 @@ final class ExtensionManager: NSObject, ObservableObject,
                 return
             }
 
-            // SECURITY FIX: Additional validation - ensure no path traversal attempts
-            let relativePath = String(
-                normalizedOptionsURL.path.dropFirst(
-                    normalizedExtensionRoot.path.count
-                )
-            )
-            if relativePath.contains("..") || relativePath.hasPrefix("/") {
-                Self.logger.error("SECURITY: Path traversal attempt detected: \(relativePath)")
+            // Belt-and-suspenders: even after resolvingSymlinksInPath, reject
+            // any raw `..` component that survived normalization (shouldn't
+            // happen, but cheap to check).
+            if optionsURL.pathComponents.contains("..") {
+                Self.logger.error("SECURITY: path traversal component detected in options URL")
                 completionHandler(
                     NSError(
                         domain: "ExtensionManager",
@@ -3193,7 +3594,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                 return
             }
 
-            // SECURITY FIX: Only grant access to the extension's specific directory, not parent directories
+            // Only grant access to the extension's specific directory, not parent directories
             webView.loadFileURL(optionsURL, allowingReadAccessTo: extensionRoot)
         } else {
             // For non-file URLs (http/https), load normally
@@ -3224,11 +3625,33 @@ final class ExtensionManager: NSObject, ObservableObject,
             webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
-        // Keep window alive keyed by extension id
+        // Keep window alive keyed by extension id, and observe its close so
+        // we don't accumulate stale NSWindow references for repeated opens.
         if let extId = extensionContexts.first(where: {
             $0.value === extensionContext
         })?.key {
+            // Replace any previous window for this extension id so multiple
+            // "Open Options" clicks don't pile up.
+            if let prevToken = optionsWindowObservers.removeValue(forKey: extId) {
+                NotificationCenter.default.removeObserver(prevToken)
+            }
+            if let prevWindow = optionsWindows.removeValue(forKey: extId), prevWindow !== window {
+                prevWindow.close()
+            }
+
             optionsWindows[extId] = window
+            let token = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.optionsWindows.removeValue(forKey: extId)
+                if let token = self.optionsWindowObservers.removeValue(forKey: extId) {
+                    NotificationCenter.default.removeObserver(token)
+                }
+            }
+            optionsWindowObservers[extId] = token
         }
 
         window.center()
@@ -3651,11 +4074,18 @@ final class ExtensionManager: NSObject, ObservableObject,
         }
     }
     // MARK: - NSPopoverDelegate
-    
+
     func popoverDidClose(_ notification: Notification) {
+        // Clear the popover's strong reference to us so the delegate chain
+        // doesn't keep ExtensionManager pinned to popover content past its
+        // usefulness. The popover itself is owned by WKWebExtension.Action.
+        if let popover = notification.object as? NSPopover, popover.delegate === self {
+            popover.delegate = nil
+        }
         DispatchQueue.main.async {
             self.isPopupActive = false
             Self.logger.debug("🔒 [ExtensionManager] Popup closed, isPopupActive = false")
+            ExtensionTelemetry.shared.record(.popupDismissed)
         }
     }
 }
