@@ -139,6 +139,33 @@
 		};
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		7FAABB01000000010000BEEF /* Build shields_compiler */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Support/ShieldsCompiler/Cargo.toml",
+				"$(SRCROOT)/Support/ShieldsCompiler/Cargo.lock",
+				"$(SRCROOT)/Support/ShieldsCompiler/src/lib.rs",
+				"$(SRCROOT)/Support/ShieldsCompiler/src/main.rs",
+				"$(SRCROOT)/Support/ShieldsCompiler/build-xcode.sh",
+			);
+			name = "Build shields_compiler";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release/libshields_compiler.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\n\"$SRCROOT/Support/ShieldsCompiler/build-xcode.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXGroup section */
 		7F8340F32E37F39400674A5D = {
 			isa = PBXGroup;
@@ -169,6 +196,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 7F8341082E37F39500674A5D /* Build configuration list for PBXNativeTarget "Socket" */;
 			buildPhases = (
+				7FAABB01000000010000BEEF /* Build shields_compiler */,
 				7F8340F82E37F39400674A5D /* Sources */,
 				7F8340F92E37F39400674A5D /* Frameworks */,
 				7F8340FA2E37F39400674A5D /* Resources */,
@@ -411,6 +439,7 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
@@ -461,6 +490,7 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
 				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
