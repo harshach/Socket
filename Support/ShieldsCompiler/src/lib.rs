@@ -42,6 +42,15 @@ pub struct CompilerSubscription {
 pub struct CompilerOutput {
     #[serde(rename = "rulesJSON")]
     pub rules_json: String,
+    /// Mirror of `rulesJSON` containing the same triggers but with the
+    /// `notify` action instead of `block`. Installed as a SECOND
+    /// `WKContentRuleList` alongside the blocker so each blocked URL
+    /// fires a `_content-blocker:notify-rule_` event on the page —
+    /// the Shields-content-world script consumes this to update real
+    /// per-tab block counts. Cosmetic (`css-display-none`) rules are
+    /// excluded since they aren't network blocks.
+    #[serde(rename = "notifyRulesJSON")]
+    pub notify_rules_json: String,
     #[serde(rename = "totalRuleCount")]
     pub total_rule_count: usize,
     #[serde(rename = "networkRuleCount")]
@@ -88,13 +97,49 @@ pub fn compile(input: CompilerInput) -> Result<CompilerOutput, Box<dyn Error>> {
         .count();
     let network_rule_count = total_rule_count - cosmetic_rule_count;
 
+    // Build a notify-action mirror of the network-block rules. We hand
+    // WebKit two compiled rule lists: the original (which actually blocks)
+    // and this mirror (which only fires `notify` events). The page sees
+    // both — block kills the request, notify gives our content-world
+    // script a `_content-blocker:notify-rule_` event so per-tab stats
+    // can reflect real activity instead of the static rule-list size.
+    let notify_rules_json = serde_json::to_string(&build_notify_mirror(&ascii_rules))?;
+
     let rules_json = serde_json::to_string(&ascii_rules)?;
     Ok(CompilerOutput {
         rules_json,
+        notify_rules_json,
         total_rule_count,
         network_rule_count,
         cosmetic_rule_count,
     })
+}
+
+/// Produce a notify-action mirror of `rules`, dropping cosmetic rules
+/// (they don't represent network blocks) and any `IgnorePreviousRules`
+/// entries (their semantics don't carry to a notify-only list).
+fn build_notify_mirror(rules: &[CbRule]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    rules
+        .iter()
+        .filter(|rule| matches!(rule.action.typ, CbType::Block | CbType::MakeHttps))
+        .filter_map(|rule| {
+            // Re-serialize the trigger then swap the action. Going through
+            // serde_json::Value avoids a hard dependency on every CbTrigger
+            // field and keeps us forward-compatible with adblock-rust
+            // additions.
+            let mut obj = serde_json::to_value(rule).ok()?;
+            // WKContentRuleList notify-action shape:
+            //   { "type": "notify", "notification": "<identifier>" }
+            // The identifier is delivered to the page in the
+            // `_WKWebExtensionContentBlocker` event payload. We use a
+            // stable token; the Shields content-world script just counts
+            // the events, it doesn't need to differentiate per-rule.
+            obj.as_object_mut()?
+                .insert("action".to_string(), json!({ "type": "notify", "notification": "socketShields" }));
+            Some(obj)
+        })
+        .collect()
 }
 
 /// Parse a JSON input string, run [`compile`], and return the result as

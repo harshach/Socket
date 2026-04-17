@@ -95,6 +95,10 @@ struct CompiledRuleArtifact: Codable, Equatable, Sendable {
     var identifier: String
     var sourceDigest: String
     var rulesFileName: String
+    /// Filename of the notify-action mirror list (sibling to rulesFileName).
+    /// Nil for artifacts built before Phase 3 Stage 2 or when the Rust
+    /// compiler didn't emit a mirror (e.g. built-in fallback).
+    var notifyRulesFileName: String?
     var compilerName: String
     var generatedAt: Date
     var totalRuleCount: Int
@@ -204,6 +208,13 @@ private struct RustCompilerInput: Codable, Sendable {
 
 private struct RustCompilerOutput: Codable, Sendable {
     var rulesJSON: String
+    /// Notify-action mirror of the network-block rules. Compiled into a
+    /// second `WKContentRuleList` alongside the blocker so the page
+    /// receives `_content-blocker:notify-rule_` events when URLs match;
+    /// the Shields content-world script forwards those to native so
+    /// per-tab stats reflect real blocks instead of the static rule count.
+    /// Optional for backward compatibility with older cached artifacts.
+    var notifyRulesJSON: String?
     var totalRuleCount: Int
     var networkRuleCount: Int
     var cosmeticRuleCount: Int
@@ -221,10 +232,34 @@ final class TrackingProtectionManager: ObservableObject {
     @Published private(set) var pageStatesByTabID: [UUID: SiteProtectionState] = [:]
 
     private var installedRuleList: WKContentRuleList?
+    /// Notify-action mirror of `installedRuleList`. Installed in parallel
+    /// so each blocked URL fires a `_content-blocker:notify-rule_` event
+    /// the Shields content-world script forwards to native for real-time
+    /// per-tab block counting. Nil when the artifact predates Stage 2 or
+    /// when the compiler returned no notify rules.
+    private var installedNotifyList: WKContentRuleList?
+    /// Single message handler instance shared across UCCs; lazy because we
+    /// only want to register it once per shared/profile UCC.
+    private lazy var notifyMessageHandler: ShieldsNotifyMessageHandler = {
+        ShieldsNotifyMessageHandler(manager: self)
+    }()
+    /// Marker token in the Shields user script's source so we can detect
+    /// duplicate installs across applyToSharedConfiguration calls.
+    private static let notifyScriptMarker = "__SOCKET_SHIELDS_NOTIFY_LISTENER__"
+    /// Name under which the Shields user script posts back to native.
+    static let shieldsNotifyMessageName = "socketShieldsNotify"
+
     private let refreshInterval: TimeInterval = 24 * 60 * 60
     private let stateFileName = "shields-state.json"
     private let rulesFilePrefix = "compiled-rules-"
     private let helperBinaryName = "shields_compiler"
+
+    /// Dedicated content world for Shields cosmetic injection. Keeps our
+    /// MutationObserver + helper globals isolated from page JS and from
+    /// extension content scripts (which run in their own per-extension
+    /// isolated worlds). Without this, `window.__socketShieldsCleanupObserver`
+    /// would land in the page world and could collide with site code.
+    static let shieldsContentWorld = WKContentWorld.world(name: "SocketShields")
     private let thirdPartyCookieMarker = "document.requestStorageAccess = function()"
     private let genericCleanupSelectors: [String] = [
         "#onetrust-banner-sdk",
@@ -635,12 +670,25 @@ final class TrackingProtectionManager: ObservableObject {
         }
 
         if let rustOutput = await compileWithRustHelper(sources: sources) {
-            let rulesFileName = "\(rulesFilePrefix)\(sourceDigest.prefix(12)).json"
+            let digestPrefix = sourceDigest.prefix(12)
+            let rulesFileName = "\(rulesFilePrefix)\(digestPrefix).json"
             saveRulesJSON(rustOutput.rulesJSON, fileName: rulesFileName)
+
+            // Save the notify mirror if the compiler emitted one (new Rust
+            // binaries) and it contains at least one rule.
+            var notifyRulesFileName: String? = nil
+            if let notifyJSON = rustOutput.notifyRulesJSON,
+               !notifyJSON.isEmpty, notifyJSON != "[]" {
+                let fileName = "\(rulesFilePrefix)notify-\(digestPrefix).json"
+                saveRulesJSON(notifyJSON, fileName: fileName)
+                notifyRulesFileName = fileName
+            }
+
             return CompiledRuleArtifact(
-                identifier: "SocketTrackingBlocker-\(sourceDigest.prefix(12))",
+                identifier: "SocketTrackingBlocker-\(digestPrefix)",
                 sourceDigest: sourceDigest,
                 rulesFileName: rulesFileName,
+                notifyRulesFileName: notifyRulesFileName,
                 compilerName: "adblock-rust",
                 generatedAt: Date(),
                 totalRuleCount: rustOutput.totalRuleCount,
@@ -658,6 +706,7 @@ final class TrackingProtectionManager: ObservableObject {
             identifier: "SocketTrackingBlocker-\(sourceDigest.prefix(12))",
             sourceDigest: sourceDigest,
             rulesFileName: rulesFileName,
+            notifyRulesFileName: nil,
             compilerName: "built-in",
             generatedAt: Date(),
             totalRuleCount: Self.defaultNetworkHosts.count + Self.defaultCosmeticSelectors.count + 1,
@@ -679,6 +728,7 @@ final class TrackingProtectionManager: ObservableObject {
             identifier: "SocketTrackingBlocker-\(sourceDigest.prefix(12))",
             sourceDigest: sourceDigest,
             rulesFileName: rulesFileName,
+            notifyRulesFileName: nil,
             compilerName: "built-in",
             generatedAt: Date(),
             totalRuleCount: Self.defaultNetworkHosts.count + Self.defaultCosmeticSelectors.count + 1,
@@ -696,29 +746,58 @@ final class TrackingProtectionManager: ObservableObject {
         guard let rulesJSON = loadRulesJSON(for: artifact), !rulesJSON.isEmpty else { return }
         guard let store = WKContentRuleListStore.default() else { return }
 
+        // Main blocker list ----------------------------------------------------
         if let existing = await withCheckedContinuation({ (cont: CheckedContinuation<WKContentRuleList?, Never>) in
             store.lookUpContentRuleList(forIdentifier: artifact.identifier) { list, _ in
                 cont.resume(returning: list)
             }
         }) {
             installedRuleList = existing
-            return
-        }
-
-        let compiled = await withCheckedContinuation { (cont: CheckedContinuation<WKContentRuleList?, Never>) in
-            store.compileContentRuleList(
-                forIdentifier: artifact.identifier,
-                encodedContentRuleList: rulesJSON
-            ) { list, error in
-                if let error {
-                    print("[Shields] Rule compile error: \(error.localizedDescription)")
+        } else {
+            let compiled = await withCheckedContinuation { (cont: CheckedContinuation<WKContentRuleList?, Never>) in
+                store.compileContentRuleList(
+                    forIdentifier: artifact.identifier,
+                    encodedContentRuleList: rulesJSON
+                ) { list, error in
+                    if let error {
+                        print("[Shields] Rule compile error: \(error.localizedDescription)")
+                    }
+                    cont.resume(returning: list)
                 }
-                cont.resume(returning: list)
             }
+            if let compiled { installedRuleList = compiled }
         }
 
-        if let compiled {
-            installedRuleList = compiled
+        // Notify-mirror list (Stage 2) ----------------------------------------
+        // Compiled separately so each blocked URL fires a JS event we can
+        // count in real time. Cached under a sibling identifier so it
+        // stays in sync with the artifact digest.
+        if let notifyFile = artifact.notifyRulesFileName,
+           let notifyJSON = loadRulesJSON(fileName: notifyFile),
+           !notifyJSON.isEmpty, notifyJSON != "[]" {
+            let notifyId = "\(artifact.identifier)-notify"
+            if let existing = await withCheckedContinuation({ (cont: CheckedContinuation<WKContentRuleList?, Never>) in
+                store.lookUpContentRuleList(forIdentifier: notifyId) { list, _ in
+                    cont.resume(returning: list)
+                }
+            }) {
+                installedNotifyList = existing
+            } else {
+                let compiled = await withCheckedContinuation { (cont: CheckedContinuation<WKContentRuleList?, Never>) in
+                    store.compileContentRuleList(
+                        forIdentifier: notifyId,
+                        encodedContentRuleList: notifyJSON
+                    ) { list, error in
+                        if let error {
+                            print("[Shields] Notify-mirror compile error: \(error.localizedDescription)")
+                        }
+                        cont.resume(returning: list)
+                    }
+                }
+                if let compiled { installedNotifyList = compiled }
+            }
+        } else {
+            installedNotifyList = nil
         }
     }
 
@@ -730,18 +809,27 @@ final class TrackingProtectionManager: ObservableObject {
         let controller = configuration.userContentController
         controller.removeAllContentRuleLists()
         controller.add(list)
+        if let notifyList = installedNotifyList {
+            controller.add(notifyList)
+        }
         if !controller.userScripts.contains(where: { $0.source.contains(thirdPartyCookieMarker) }) {
             controller.addUserScript(thirdPartyCookieScript)
         }
+        installShieldsNotifyHooks(on: controller)
     }
 
     private func removeFromSharedConfiguration() {
         let configuration = BrowserConfiguration.shared.webViewConfiguration
         let controller = configuration.userContentController
         controller.removeAllContentRuleLists()
-        let remaining = controller.userScripts.filter { !$0.source.contains(thirdPartyCookieMarker) }
+        let remaining = controller.userScripts.filter {
+            !$0.source.contains(thirdPartyCookieMarker)
+            && !$0.source.contains(Self.notifyScriptMarker)
+        }
         controller.removeAllUserScripts()
         remaining.forEach { controller.addUserScript($0) }
+        // Remove our message handler if it was registered.
+        controller.removeScriptMessageHandler(forName: Self.shieldsNotifyMessageName)
     }
 
     private func applyToExistingWebViews() {
@@ -789,17 +877,25 @@ final class TrackingProtectionManager: ObservableObject {
         let controller = webView.configuration.userContentController
         controller.removeAllContentRuleLists()
         controller.add(installedRuleList)
+        if let notifyList = installedNotifyList {
+            controller.add(notifyList)
+        }
         if !controller.userScripts.contains(where: { $0.source.contains(thirdPartyCookieMarker) }) {
             controller.addUserScript(thirdPartyCookieScript)
         }
+        installShieldsNotifyHooks(on: controller)
     }
 
     private func removeTracking(from webView: WKWebView) {
         let controller = webView.configuration.userContentController
         controller.removeAllContentRuleLists()
-        let remaining = controller.userScripts.filter { !$0.source.contains(thirdPartyCookieMarker) }
+        let remaining = controller.userScripts.filter {
+            !$0.source.contains(thirdPartyCookieMarker)
+            && !$0.source.contains(Self.notifyScriptMarker)
+        }
         controller.removeAllUserScripts()
         remaining.forEach { controller.addUserScript($0) }
+        controller.removeScriptMessageHandler(forName: Self.shieldsNotifyMessageName)
     }
 
     // MARK: - Generic cleanup / telemetry
@@ -858,11 +954,25 @@ final class TrackingProtectionManager: ObservableObject {
         })();
         """
 
+        // Run in our dedicated Shields content world so the helper globals
+        // (`__socketShieldsCleanupObserver`) and the MutationObserver don't
+        // leak into the page world or any extension's isolated world.
         return await withCheckedContinuation { continuation in
-            webView.evaluateJavaScript(script) { result, _ in
-                if let value = result as? NSNumber {
-                    continuation.resume(returning: value.intValue)
-                } else {
+            webView.evaluateJavaScript(
+                script,
+                in: nil,
+                in: Self.shieldsContentWorld
+            ) { result in
+                switch result {
+                case .success(let value):
+                    if let n = value as? NSNumber {
+                        continuation.resume(returning: n.intValue)
+                    } else if let i = value as? Int {
+                        continuation.resume(returning: i)
+                    } else {
+                        continuation.resume(returning: 0)
+                    }
+                case .failure:
                     continuation.resume(returning: 0)
                 }
             }
@@ -873,9 +983,15 @@ final class TrackingProtectionManager: ObservableObject {
         for tab: Tab,
         temporaryRelaxed: Bool? = nil
     ) -> PageBlockStats {
+        // networkRuleCount and cosmeticRuleCount reset to 0 per navigation;
+        // they're real-time counters now, populated by the notify handler
+        // (`handleShieldsNotify`) for network blocks and by
+        // `applyGenericCleanupScript` for cosmetic hides. The artifact's
+        // total rule count is surfaced separately as the "rules loaded"
+        // figure in Settings — it's not a per-page metric.
         PageBlockStats(
-            networkRuleCount: activeArtifact?.networkRuleCount ?? 0,
-            cosmeticRuleCount: activeArtifact?.cosmeticRuleCount ?? 0,
+            networkRuleCount: 0,
+            cosmeticRuleCount: 0,
             hiddenElementCount: 0,
             scriptletActionCount: 0,
             thirdPartyStorageRestricted: shouldApplyTracking(to: tab),
@@ -1033,6 +1149,7 @@ final class TrackingProtectionManager: ObservableObject {
                 let result = try ShieldsEngine.shared.compile(rawJSON: inputJSON)
                 return RustCompilerOutput(
                     rulesJSON: result.rulesJSON,
+                    notifyRulesJSON: result.notifyRulesJSON,
                     totalRuleCount: result.totalRuleCount,
                     networkRuleCount: result.networkRuleCount,
                     cosmeticRuleCount: result.cosmeticRuleCount
@@ -1346,5 +1463,95 @@ final class TrackingProtectionManager: ObservableObject {
     private static func sha256(_ value: String) -> String {
         let digest = SHA256.hash(data: Data(value.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Shields notify hooks (Stage 2)
+
+    /// Install (or re-install idempotently) the message handler + JS
+    /// listener that turns `_content-blocker:notify-rule_` events from the
+    /// notify-mirror rule list into per-tab `networkRuleCount` increments.
+    fileprivate func installShieldsNotifyHooks(on controller: WKUserContentController) {
+        // Re-register the handler unconditionally — `removeScriptMessageHandler`
+        // is a no-op when nothing is registered. Without removal first we'd
+        // hit `NSInternalInconsistencyException: A user script handler with
+        // the name '...' was already added`.
+        controller.removeScriptMessageHandler(forName: Self.shieldsNotifyMessageName)
+        controller.add(notifyMessageHandler, name: Self.shieldsNotifyMessageName)
+
+        // Install the listener exactly once per UCC (marker check).
+        let alreadyInstalled = controller.userScripts.contains {
+            $0.source.contains(Self.notifyScriptMarker)
+        }
+        if alreadyInstalled { return }
+
+        let source = """
+        \(Self.notifyScriptMarker)
+        // Socket Shields: forward WKContentRuleList notify-action events to
+        // native so per-tab block counts reflect real activity. The notify
+        // mirror rules carry the identifier "socketShields"; we match on
+        // that to avoid double-counting unrelated content-blocker events.
+        (function() {
+          if (window.__socketShieldsNotifyListenerInstalled) return;
+          window.__socketShieldsNotifyListenerInstalled = true;
+          document.addEventListener('webkitcontentblocked', function(event) {
+            try {
+              var detail = event && event.detail;
+              if (!detail || detail.identifier !== 'socketShields') return;
+              if (window.webkit && window.webkit.messageHandlers
+                  && window.webkit.messageHandlers.\(Self.shieldsNotifyMessageName)) {
+                window.webkit.messageHandlers.\(Self.shieldsNotifyMessageName).postMessage({
+                  url: detail.url || (event.target && event.target.URL) || ''
+                });
+              }
+            } catch (e) {}
+          }, false);
+        })();
+        """
+        controller.addUserScript(WKUserScript(
+            source: source,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+    }
+
+    /// Bump the network block counter for whichever tab owns `webView`.
+    /// Called from `ShieldsNotifyMessageHandler` on every notify event.
+    fileprivate func handleShieldsNotify(from webView: WKWebView?) {
+        guard let webView else { return }
+        guard let browserManager else { return }
+        guard let tab = browserManager.tabManager.allTabs().first(where: { tab in
+            existingWebView(for: tab) === webView
+        }) else { return }
+        var stats = pageStatsByTabID[tab.id] ?? makeEmptyStats(for: tab)
+        stats.networkRuleCount += 1
+        pageStatsByTabID[tab.id] = stats
+        pageStatesByTabID[tab.id] = siteProtectionState(for: tab)
+    }
+}
+
+// MARK: - Notify-event message handler
+
+/// Bridges `_content-blocker:notify-rule_` JS events back to
+/// `TrackingProtectionManager` so it can increment per-tab block counts.
+@MainActor
+private final class ShieldsNotifyMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var manager: TrackingProtectionManager?
+
+    init(manager: TrackingProtectionManager) {
+        self.manager = manager
+        super.init()
+    }
+
+    nonisolated func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        // Hop to MainActor to touch manager state safely. The webView
+        // reference is captured before the hop because WKScriptMessage
+        // properties aren't Sendable.
+        let webView = message.webView
+        Task { @MainActor [weak self] in
+            self?.manager?.handleShieldsNotify(from: webView)
+        }
     }
 }

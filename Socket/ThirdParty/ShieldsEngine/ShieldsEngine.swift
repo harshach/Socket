@@ -17,6 +17,9 @@ import ShieldsCompilerFFI
 /// Matches `CompilerOutput` in Support/ShieldsCompiler/src/lib.rs.
 struct ShieldsEngineOutput: Decodable, Sendable {
     let rulesJSON: String
+    /// Notify-action mirror — see `CompilerOutput` in lib.rs. Optional so
+    /// older Rust binaries that don't emit it still decode.
+    let notifyRulesJSON: String?
     let totalRuleCount: Int
     let networkRuleCount: Int
     let cosmeticRuleCount: Int
