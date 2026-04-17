@@ -1006,6 +1006,89 @@ final class ExtensionManager: NSObject, ObservableObject,
         grantRequestedPermissions(to: extensionContext, webExtension: webExtension)
     }
 
+    /// Marker that identifies a service worker file we have already patched
+    /// so re-patching on app relaunch is idempotent.
+    private static let serviceWorkerPolyfillMarker = "// __SOCKET_SW_POLYFILL_V1__"
+
+    /// Polyfill prepended to MV3 service workers. Installs no-op stubs for
+    /// chrome.offscreen and chrome.privacy on the worker's globalThis so
+    /// init code that touches them (1Password, others) doesn't throw before
+    /// the SW can register `chrome.runtime.onConnect` listeners. The result
+    /// is that `runtime.connect()` from the popup actually finds a live
+    /// background.
+    ///
+    /// The block is wrapped in an IIFE so it works in both classic SWs and
+    /// `type: "module"` SWs (1Password's case) without polluting the module
+    /// scope.
+    private static let serviceWorkerPolyfill: String = """
+    \(serviceWorkerPolyfillMarker)
+    // Socket: pre-init shims for APIs WKWebExtension does not expose.
+    (function(g) {
+      var c = (typeof chrome !== 'undefined') ? chrome
+            : (typeof browser !== 'undefined') ? browser : null;
+      if (!c) return;
+      if (!c.offscreen) {
+        c.offscreen = {
+          Reason: { TESTING:'TESTING', DOM_PARSER:'DOM_PARSER', AUDIO_PLAYBACK:'AUDIO_PLAYBACK',
+                    DOM_SCRAPING:'DOM_SCRAPING', BLOBS:'BLOBS', IFRAME_SCRIPTING:'IFRAME_SCRIPTING',
+                    BATTERY_STATUS:'BATTERY_STATUS', WEB_RTC:'WEB_RTC', CLIPBOARD:'CLIPBOARD',
+                    DISPLAY_MEDIA:'DISPLAY_MEDIA', GEOLOCATION:'GEOLOCATION', LOCAL_STORAGE:'LOCAL_STORAGE',
+                    MATCH_MEDIA:'MATCH_MEDIA', USER_MEDIA:'USER_MEDIA', WORKERS:'WORKERS' },
+          createDocument: function() { return Promise.resolve(); },
+          closeDocument: function() { return Promise.resolve(); },
+          hasDocument: function() { return Promise.resolve(false); }
+        };
+      }
+      if (!c.privacy) {
+        var noopSetting = {
+          get: function() { return Promise.resolve({ value: undefined, levelOfControl: 'not_controllable' }); },
+          set: function() { return Promise.resolve(); },
+          clear: function() { return Promise.resolve(); },
+          onChange: { addListener: function(){}, removeListener: function(){}, hasListener: function(){return false;} }
+        };
+        var bag = function(keys) { var o = {}; for (var i=0;i<keys.length;i++) o[keys[i]] = noopSetting; return o; };
+        c.privacy = {
+          network: bag(['networkPredictionEnabled','webRTCIPHandlingPolicy','webRTCMultipleRoutesEnabled','webRTCNonProxiedUdpEnabled']),
+          services: bag(['alternateErrorPagesEnabled','autofillAddressEnabled','autofillCreditCardEnabled','autofillEnabled','passwordSavingEnabled','safeBrowsingEnabled','safeBrowsingExtendedReportingEnabled','searchSuggestEnabled','spellingServiceEnabled','translationServiceEnabled']),
+          websites: bag(['hyperlinkAuditingEnabled','referrersEnabled','doNotTrackEnabled','protectedContentEnabled','thirdPartyCookiesAllowed'])
+        };
+      }
+    })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));
+
+    """
+
+    /// Read the manifest at `manifestURL`, find the MV3 service worker file,
+    /// and prepend `serviceWorkerPolyfill` (idempotent via the marker
+    /// comment). No-op for MV2 or extensions without a service worker.
+    private func patchServiceWorkerForCompat(packageDir: URL, manifestURL: URL) {
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        guard let background = manifest["background"] as? [String: Any],
+              let swPath = background["service_worker"] as? String, !swPath.isEmpty
+        else { return }
+
+        let swURL = packageDir.appendingPathComponent(swPath)
+        guard let existing = try? String(contentsOf: swURL, encoding: .utf8) else {
+            Self.logger.debug("SW polyfill: source not readable at \(swURL.path, privacy: .public)")
+            return
+        }
+
+        // Idempotent: skip if our marker is already present anywhere in the
+        // first ~512 bytes (where we put it).
+        let probeLength = min(existing.count, 512)
+        let probe = String(existing.prefix(probeLength))
+        if probe.contains(Self.serviceWorkerPolyfillMarker) { return }
+
+        let patched = Self.serviceWorkerPolyfill + existing
+        do {
+            try patched.write(to: swURL, atomically: true, encoding: .utf8)
+            Self.logger.info("SW polyfill prepended to \(swURL.lastPathComponent, privacy: .public) for compat shims")
+        } catch {
+            Self.logger.error("SW polyfill write failed for \(swURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Validate MV3-specific requirements
     private func validateMV3Requirements(manifest: [String: Any], baseURL: URL)
         throws
@@ -1626,6 +1709,10 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         // Patch domain-specific content scripts to MAIN world for WebKit fetch compatibility
         patchManifestForWebKit(at: manifestURL)
+        // Prepend missing-API stubs to the MV3 service worker so init code
+        // that touches chrome.offscreen / chrome.privacy / etc. doesn't
+        // crash before runtime.onConnect listeners can register.
+        patchServiceWorkerForCompat(packageDir: tempDir, manifestURL: manifestURL)
 
         // STEP 2: Create a temporary WKWebExtension just to get the uniqueIdentifier
         Self.logger.debug("Initializing WKWebExtension from \(tempDir.path, privacy: .public)")
@@ -2600,6 +2687,13 @@ final class ExtensionManager: NSObject, ObservableObject,
                 // Patch domain-specific content scripts to MAIN world on each load
                 // (idempotent — skips entries that already have a world set)
                 patchManifestForWebKit(at: manifestURL)
+                // Re-apply the SW polyfill in case the extension was installed
+                // before this shim shipped, or the SW file changed via update.
+                // Idempotent via marker comment.
+                patchServiceWorkerForCompat(
+                    packageDir: URL(fileURLWithPath: entity.packagePath),
+                    manifestURL: manifestURL
+                )
                 let manifest = try ExtensionUtils.validateManifest(at: manifestURL)
                 loadedExtensions.append(InstalledExtension(from: entity, manifest: manifest))
                 if entity.isEnabled {
@@ -3712,7 +3806,10 @@ final class ExtensionManager: NSObject, ObservableObject,
         }
 
         // Single-shot message handling
-        let handler = NativeMessagingHandler(applicationId: applicationId)
+        let handler = NativeMessagingHandler(
+            applicationId: applicationId,
+            extensionId: extensionContext.uniqueIdentifier
+        )
         handler.sendMessage(message) { response, error in
             replyHandler(response, error)
         }
@@ -3730,9 +3827,12 @@ final class ExtensionManager: NSObject, ObservableObject,
         }
         
         
-        let handler = NativeMessagingHandler(applicationId: applicationId)
+        let handler = NativeMessagingHandler(
+            applicationId: applicationId,
+            extensionId: extensionContext.uniqueIdentifier
+        )
         handler.connect(port: port)
-        
+
         // Keep a strong reference to the handler if needed, but usually the port delegate handles lifecycle
         // For now, we rely on the port retaining the delegate or the handler retaining itself via the port relationship
         // (Note: In a production app, we might need to manage these references in a set)
@@ -4469,15 +4569,17 @@ final class WeakAnchor {
 class NativeMessagingHandler: NSObject {
     private static let logger = Logger(subsystem: "com.socket.browser", category: "NativeMessaging")
     let applicationId: String
+    let extensionId: String
     private var process: Process?
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
     private weak var port: WKWebExtension.MessagePort?
     private var outputBuffer = Data()
-    
-    init(applicationId: String) {
+
+    init(applicationId: String, extensionId: String) {
         self.applicationId = applicationId
+        self.extensionId = extensionId
         super.init()
     }
     
@@ -4626,12 +4728,40 @@ class NativeMessagingHandler: NSObject {
                 if let data = try? Data(contentsOf: path),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let binaryPath = json["path"] as? String {
-                    
+
                     Self.logger.info("Found manifest at \(path.path)")
-                    
+
                     // Launch it
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: binaryPath)
+
+                    // Per Chrome's native-messaging spec, the host binary is
+                    // launched with two arguments:
+                    //   argv[1] = origin URL of the calling extension,
+                    //              e.g. `chrome-extension://<id>/`
+                    //   argv[2] = parent window handle (an integer; macOS
+                    //              hosts ignore it, so "0" is fine)
+                    //
+                    // Hosts like 1Password / Bitwarden / Dashlane gate access
+                    // by checking argv[1] against a whitelist in their
+                    // manifest's `allowed_origins`. WKWebExtension's per-app
+                    // UUID won't be in those lists, so when our origin isn't
+                    // accepted we fall back to the first entry from the
+                    // manifest's `allowed_origins`. This matches what every
+                    // other Chromium-derivative does (Brave, Edge, etc.) and
+                    // is what makes 1Password's popup actually load.
+                    let ourOrigin = "chrome-extension://\(self.extensionId)/"
+                    let allowedOrigins = (json["allowed_origins"] as? [String]) ?? []
+                    let originToUse: String
+                    if allowedOrigins.isEmpty || allowedOrigins.contains(ourOrigin) {
+                        originToUse = ourOrigin
+                    } else if let firstAllowed = allowedOrigins.first {
+                        originToUse = firstAllowed
+                        Self.logger.info("Using whitelisted origin \(firstAllowed, privacy: .public) instead of \(ourOrigin, privacy: .public) for host \(self.applicationId, privacy: .public)")
+                    } else {
+                        originToUse = ourOrigin
+                    }
+                    process.arguments = [originToUse, "0"]
                     
                     let input = Pipe()
                     let output = Pipe()

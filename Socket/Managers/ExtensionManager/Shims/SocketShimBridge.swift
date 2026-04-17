@@ -140,6 +140,62 @@ final class SocketShimBridge: NSObject, WKScriptMessageHandlerWithReply {
         makeMethod: makeMethod
       };
 
+      // ===== Pure-client no-op shims =====
+      // Some MV3 extensions (1Password, others) call APIs Apple's
+      // WKWebExtension doesn't expose during background-service-worker
+      // init. Without a stub, the SW throws ReferenceError or TypeError
+      // before it can register `chrome.runtime.onConnect` listeners, so
+      // every popup connection fails with "No runtime.onConnect listeners
+      // found." A no-op stub doesn't fully implement these APIs, but it
+      // lets the SW's init code run to the listener-registration step.
+      //
+      // chrome.offscreen — used by MV3 SWs to spawn offscreen documents
+      // for cross-origin fetch / DOM parsing / WebRTC. We can't host a
+      // real offscreen document, so report "no document exists" and
+      // resolve quietly.
+      if (!chromeNs.offscreen) {
+        var stubReason = "Socket: chrome.offscreen is not implemented; treating as unavailable.";
+        chromeNs.offscreen = {
+          Reason: { TESTING: 'TESTING', DOM_PARSER: 'DOM_PARSER', AUDIO_PLAYBACK: 'AUDIO_PLAYBACK',
+                    DOM_SCRAPING: 'DOM_SCRAPING', BLOBS: 'BLOBS', IFRAME_SCRIPTING: 'IFRAME_SCRIPTING',
+                    BATTERY_STATUS: 'BATTERY_STATUS', WEB_RTC: 'WEB_RTC', CLIPBOARD: 'CLIPBOARD',
+                    DISPLAY_MEDIA: 'DISPLAY_MEDIA', GEOLOCATION: 'GEOLOCATION', LOCAL_STORAGE: 'LOCAL_STORAGE',
+                    MATCH_MEDIA: 'MATCH_MEDIA', USER_MEDIA: 'USER_MEDIA', WORKERS: 'WORKERS' },
+          createDocument: function () { console.warn(stubReason); return Promise.resolve(); },
+          closeDocument:  function () { return Promise.resolve(); },
+          hasDocument:    function () { return Promise.resolve(false); }
+        };
+        if (window.browser && !window.browser.offscreen) window.browser.offscreen = chromeNs.offscreen;
+      }
+
+      // chrome.privacy — settings controllers used by some extensions to
+      // read/adjust browser privacy preferences. Stub each leaf to a
+      // no-op `Setting` whose .get returns { value: undefined,
+      // levelOfControl: 'not_controllable' }, .set/.clear resolve. Better
+      // than the SW crashing on `chrome.privacy.network.networkPredictionEnabled.get`.
+      if (!chromeNs.privacy) {
+        var noopSetting = {
+          get: function () { return Promise.resolve({ value: undefined, levelOfControl: 'not_controllable' }); },
+          set: function () { return Promise.resolve(); },
+          clear: function () { return Promise.resolve(); },
+          onChange: { addListener: function () {}, removeListener: function () {}, hasListener: function () { return false; } }
+        };
+        var bagOfNoops = function (keys) {
+          var obj = {};
+          for (var i = 0; i < keys.length; i += 1) { obj[keys[i]] = noopSetting; }
+          return obj;
+        };
+        chromeNs.privacy = {
+          network: bagOfNoops(['networkPredictionEnabled', 'webRTCIPHandlingPolicy', 'webRTCMultipleRoutesEnabled', 'webRTCNonProxiedUdpEnabled']),
+          services: bagOfNoops(['alternateErrorPagesEnabled', 'autofillAddressEnabled', 'autofillCreditCardEnabled', 'autofillEnabled',
+                                'passwordSavingEnabled', 'safeBrowsingEnabled', 'safeBrowsingExtendedReportingEnabled',
+                                'searchSuggestEnabled', 'spellingServiceEnabled', 'translationServiceEnabled']),
+          websites: bagOfNoops(['hyperlinkAuditingEnabled', 'referrersEnabled', 'doNotTrackEnabled', 'protectedContentEnabled',
+                                'thirdPartyCookiesAllowed'])
+        };
+        if (window.browser && !window.browser.privacy) window.browser.privacy = chromeNs.privacy;
+      }
+
       // `__socketShimNamespaces` is a JSON array of namespace names the native
       // router advertises. Installed by `ExtensionManager.setupExtensionController`.
       var advertised = [];
