@@ -16,6 +16,45 @@ import WebKit
 
 @MainActor
 public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
+    /// User agent presented to Chrome Web Store / Edge Add-ons domains so
+    /// Google/Microsoft render their native "Add to <browser>" button as
+    /// clickable. Our `WebStoreInjector.js` then replaces it with "Add to
+    /// Socket". Safari-family UA gets a disabled button and an "install
+    /// Chrome" banner, which is why we spoof here and only here.
+    static let chromeWebStoreSpoofUserAgent: String =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    /// True when the URL's host is Chrome Web Store or Edge Add-ons. Narrow
+    /// on purpose — we don't want to spoof Chrome UA beyond these two.
+    static func isChromeWebStoreHost(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        if host == "chromewebstore.google.com" { return true }
+        if host == "chrome.google.com" && url.path.lowercased().contains("/webstore") { return true }
+        if host == "microsoftedge.microsoft.com" && url.path.lowercased().contains("/addons") { return true }
+        return false
+    }
+
+    /// Hosts where we spoof Chrome UA to unblock extension-side login flows.
+    /// Zoom's `logintransit.bundle.js` content script is supposed to close
+    /// the auth tab and hand the token to the background worker; when it
+    /// sees Safari UA on the redirect page it takes a non-extension code
+    /// path and hangs on "Login in progress. Please wait." Extend carefully
+    /// — adding hosts here makes every page on those hosts see a Chrome UA.
+    static func requiresChromeUserAgentSpoof(_ url: URL) -> Bool {
+        if isChromeWebStoreHost(url) { return true }
+        guard let host = url.host?.lowercased() else { return false }
+        if host.hasSuffix(".zoom.us") || host == "zoom.us" {
+            // Narrow to the extension-login transit pages so regular Zoom
+            // traffic (joining meetings, Zoom web app) still sees Socket's
+            // real UA. Both `/zm/extension_login/` and `/myhome` are where
+            // Zoom's installed content scripts match.
+            let path = url.path.lowercased()
+            if path.contains("/zm/extension_login/") { return true }
+            if path.contains("/myhome") { return true }
+        }
+        return false
+    }
+
     public let id: UUID
     var url: URL
     var name: String
@@ -3037,6 +3076,27 @@ extension Tab: WKNavigationDelegate {
 
             // Setup boost user script before navigation starts
             setupBoostUserScript(for: url, in: webView)
+
+            // UA spoof: a few extension-critical hosts branch on User-Agent
+            // (Chrome Web Store's "Add to Chrome" button; Zoom's
+            // logintransit page). Present a Chrome UA on just those pages;
+            // reset elsewhere so the rest of the web sees Socket's normal
+            // Safari-like UA.
+            if Self.requiresChromeUserAgentSpoof(url) {
+                webView.customUserAgent = Self.chromeWebStoreSpoofUserAgent
+            } else if webView.customUserAgent != nil {
+                webView.customUserAgent = nil
+            }
+
+            // Pre-wake the background service worker for the navigating
+            // extension contexts when the URL matches any content script
+            // match pattern. Prevents a race where the content script fires
+            // at document_end but `runtime.sendMessage` lands on a suspended
+            // background worker and gets dropped. This is best-effort; any
+            // error is logged by WKWebExtension itself.
+            if #available(macOS 15.5, *) {
+                ExtensionManager.shared.warmBackgroundIfNeeded(for: url)
+            }
         }
 
 

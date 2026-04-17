@@ -37,6 +37,20 @@ class BrowserWindowState {
     /// Width for the AI assistant sidebar when visible
     var aiSidebarWidth: CGFloat = 350
 
+    /// Id of the extension whose chrome.sidePanel is currently open in this
+    /// window, or nil when no panel is active. Set by `SidePanelShim` via
+    /// `BrowserManager.openSidePanel(for:in:)` and cleared from the panel's
+    /// close button.
+    var activeSidePanelExtensionId: String?
+
+    /// Path relative to the extension's baseURL that should be loaded in the
+    /// side panel. Populated at `open` time so the view can navigate without
+    /// re-querying the shim.
+    var activeSidePanelPath: String?
+
+    /// Width for the chrome.sidePanel drawer when visible.
+    var sidePanelWidth: CGFloat = 360
+
     /// Usable width for sidebar content (excludes padding)
     var sidebarContentWidth: CGFloat = 234
 

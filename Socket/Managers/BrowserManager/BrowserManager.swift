@@ -1589,6 +1589,34 @@ class BrowserManager: ObservableObject {
         return false
     }
 
+    // MARK: - chrome.sidePanel
+
+    /// Open an extension's side panel in the currently-active window.
+    /// No-op when there is no active window (e.g. app launched but not yet
+    /// shown). Closing is via `closeSidePanel(in:)`.
+    func openSidePanel(extensionId: String, path: String) {
+        guard let activeWindow = windowRegistry?.activeWindow else { return }
+        activeWindow.activeSidePanelExtensionId = extensionId
+        activeWindow.activeSidePanelPath = path
+    }
+
+    /// Close the side panel in the supplied window state. Called by the
+    /// panel's header close button.
+    func closeSidePanel(in windowState: BrowserWindowState) {
+        windowState.activeSidePanelExtensionId = nil
+        windowState.activeSidePanelPath = nil
+    }
+
+    /// If any window is showing this extension's side panel, update the path
+    /// so the host view re-navigates. Triggered when the extension calls
+    /// `chrome.sidePanel.setOptions({path})`.
+    func refreshSidePanelIfShowing(extensionId: String, newPath: String) {
+        guard let registry = windowRegistry else { return }
+        for window in registry.allWindows where window.activeSidePanelExtensionId == extensionId {
+            window.activeSidePanelPath = newPath
+        }
+    }
+
     // MARK: - Window-Aware Tab Operations for Commands
 
     /// Get the current tab for the active window (used by keyboard shortcuts)

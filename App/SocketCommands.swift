@@ -385,6 +385,8 @@ struct SocketCommands: Commands {
                         }
                     }
 
+                    extensionCommandSection
+
                     #if DEBUG
                     Divider()
                     Button("Open Popup Console") {
@@ -426,5 +428,88 @@ struct DynamicShortcutModifier: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+// MARK: - Extension Command Items (chrome.commands → menubar)
+
+@available(macOS 15.5, *)
+extension SocketCommands {
+    /// Dynamic section that lists every loaded extension's commands as
+    /// menu items with the extension's `suggested_key` shortcut bound.
+    /// Touching `installedExtensions.count` makes the SwiftUI Commands body
+    /// rebuild on install/uninstall so the section stays current.
+    @ViewBuilder
+    var extensionCommandSection: some View {
+        if let manager = browserManager.extensionManager,
+           manager.installedExtensions.contains(where: { $0.isEnabled }) {
+            let entries = manager.allMenuCommands()
+            if !entries.isEmpty {
+                Divider()
+                ForEach(entries) { entry in
+                    Button(entry.title) {
+                        manager.performMenuCommand(
+                            extensionId: entry.extensionId,
+                            commandId: entry.commandId
+                        )
+                    }
+                    .modifier(ExtensionCommandShortcut(
+                        activationKey: entry.activationKey,
+                        modifierFlags: entry.modifierFlags
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Maps a WKWebExtensionCommand's (activationKey, modifierFlags) to a
+/// SwiftUI `.keyboardShortcut`. Returns the unmodified content when the
+/// extension didn't declare a shortcut so users can still trigger via the
+/// menu without colliding with built-in shortcuts.
+private struct ExtensionCommandShortcut: ViewModifier {
+    let activationKey: String?
+    let modifierFlags: NSEvent.ModifierFlags
+
+    func body(content: Content) -> some View {
+        if let key = keyEquivalent {
+            content.keyboardShortcut(key, modifiers: eventModifiers)
+        } else {
+            content
+        }
+    }
+
+    private var keyEquivalent: KeyEquivalent? {
+        guard let raw = activationKey, !raw.isEmpty else { return nil }
+        // Apple's WKWebExtensionCommand normalizes single-character keys
+        // (e.g. "F", "K"). For named keys we map a small whitelist.
+        let lower = raw.lowercased()
+        switch lower {
+        case "return", "enter": return .return
+        case "escape", "esc":   return .escape
+        case "delete", "backspace": return .delete
+        case "tab":             return .tab
+        case "space":           return .space
+        case "up", "uparrow":   return .upArrow
+        case "down", "downarrow": return .downArrow
+        case "left", "leftarrow": return .leftArrow
+        case "right", "rightarrow": return .rightArrow
+        case "home":            return .home
+        case "end":             return .end
+        case "pageup":          return .pageUp
+        case "pagedown":        return .pageDown
+        default:
+            if raw.count == 1, let ch = raw.first { return KeyEquivalent(ch) }
+            return nil
+        }
+    }
+
+    private var eventModifiers: EventModifiers {
+        var result: EventModifiers = []
+        if modifierFlags.contains(.command) { result.insert(.command) }
+        if modifierFlags.contains(.shift)   { result.insert(.shift)   }
+        if modifierFlags.contains(.option)  { result.insert(.option)  }
+        if modifierFlags.contains(.control) { result.insert(.control) }
+        return result
     }
 }

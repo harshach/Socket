@@ -39,10 +39,24 @@ final class ExtensionManager: NSObject, ObservableObject,
     // closes the window.
     private var optionsWindows: [String: NSWindow] = [:]
     private var optionsWindowObservers: [String: NSObjectProtocol] = [:]
+
+    /// Popup windows created via `chrome.windows.create({type: 'popup'})`.
+    /// Zoom (and many other extensions) spawn a small auxiliary window for
+    /// sign-in / inline menus; we host these as real NSWindows so they behave
+    /// like Chrome's popup windows instead of getting shoehorned into tabs.
+    /// Keyed by a monotonic token rather than extension id because a single
+    /// extension can have several popups open at once.
+    private var extensionPopupWindows: [UUID: NSWindow] = [:]
+    private var extensionPopupWindowObservers: [UUID: NSObjectProtocol] = [:]
     // Stable adapters for tabs/windows used when notifying controller events
     private var tabAdapters: [UUID: ExtensionTabAdapter] = [:]
     internal var windowAdapter: ExtensionWindowAdapter?
     private weak var browserManagerRef: BrowserManager?
+
+    /// Read-only accessor for shims that need to reach the currently-attached
+    /// `BrowserManager` (e.g. `ProxyShim` needs the active profile to update
+    /// its data store). Nil before the first window has called `attach`.
+    var attachedBrowserManager: BrowserManager? { browserManagerRef }
     // Whether to auto-resize extension action popovers to content. Disabled per UX preference.
     // UI delegate for popup context menus
     private var popupUIDelegate: PopupUIDelegate?
@@ -91,14 +105,20 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// touch `WKWebExtensionController.unload` and main-actor state.
     @MainActor
     func shutdownSync() {
-        // Close options windows first so their delegates don't race with
-        // controller teardown.
+        // Close options + popup windows first so their delegates don't race
+        // with controller teardown.
         for (_, window) in optionsWindows { window.close() }
         optionsWindows.removeAll()
         for (_, token) in optionsWindowObservers {
             NotificationCenter.default.removeObserver(token)
         }
         optionsWindowObservers.removeAll()
+        for (_, window) in extensionPopupWindows { window.close() }
+        extensionPopupWindows.removeAll()
+        for (_, token) in extensionPopupWindowObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        extensionPopupWindowObservers.removeAll()
 
         for (_, tokens) in anchorObserverTokens {
             for token in tokens { NotificationCenter.default.removeObserver(token) }
@@ -206,10 +226,13 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// a given namespace).
     private func registerShimsIfNeeded() {
         if #available(macOS 15.4, *) {
-            // Management is the only shim that lands with the initial wiring;
-            // subsequent shims (sidePanel, tabGroups, proxy, identity) register
-            // themselves here as they come online.
             SocketShimRouter.shared.register(ManagementShim(extensionManager: self))
+            SocketShimRouter.shared.register(IdentityShim())
+            SocketShimRouter.shared.register(ProxyShim(extensionManager: self))
+            SocketShimRouter.shared.register(TabGroupsShim(extensionManager: self))
+            if #available(macOS 15.5, *) {
+                SocketShimRouter.shared.register(SidePanelShim(extensionManager: self))
+            }
         }
     }
 
@@ -2241,6 +2264,70 @@ final class ExtensionManager: NSObject, ObservableObject,
                                         extensionName: name)
     }
 
+    // MARK: - Menubar Commands (chrome.commands)
+
+    /// One menubar-renderable entry derived from an extension's
+    /// `chrome.commands` (or default `_execute_action` shortcut). The router
+    /// uses this to project commands into Socket's main menu.
+    @available(macOS 15.4, *)
+    struct MenuCommandEntry: Identifiable {
+        var id: String { "\(extensionId)\u{1F}\(commandId)" }
+        let extensionId: String
+        let extensionName: String
+        let commandId: String
+        let title: String
+        let activationKey: String?
+        let modifierFlags: NSEvent.ModifierFlags
+    }
+
+    /// All commands across enabled extensions, flattened for menu rendering.
+    /// Excludes commands without a discoverable title to avoid mystery menu
+    /// entries.
+    @available(macOS 15.4, *)
+    func allMenuCommands() -> [MenuCommandEntry] {
+        var entries: [MenuCommandEntry] = []
+        for (extensionId, context) in extensionContexts {
+            let extensionName = context.webExtension.displayName
+                ?? installedExtensions.first(where: { $0.id == extensionId })?.name
+                ?? "Extension"
+            for command in context.commands {
+                let title = command.title.isEmpty ? command.id : command.title
+                guard !title.isEmpty else { continue }
+                entries.append(MenuCommandEntry(
+                    extensionId: extensionId,
+                    extensionName: extensionName,
+                    commandId: command.id,
+                    title: title,
+                    activationKey: command.activationKey,
+                    modifierFlags: command.modifierFlags
+                ))
+            }
+        }
+        // Stable sort: by extension name, then command title.
+        entries.sort {
+            if $0.extensionName != $1.extensionName { return $0.extensionName < $1.extensionName }
+            return $0.title < $1.title
+        }
+        return entries
+    }
+
+    /// Trigger the extension's command via WKWebExtension. No-op if either
+    /// the extension or command id is unknown.
+    @available(macOS 15.4, *)
+    func performMenuCommand(extensionId: String, commandId: String) {
+        guard let context = extensionContexts[extensionId] else { return }
+        guard let command = context.commands.first(where: { $0.id == commandId }) else { return }
+        context.performCommand(command)
+        ExtensionTelemetry.shared.record(
+            .shimCallFailed,  // reuse channel — no dedicated event for command runs
+            severity: .info,
+            extensionId: extensionId,
+            extensionName: context.webExtension.displayName,
+            message: "command performed",
+            context: ["command": commandId]
+        )
+    }
+
     /// Open the extension's options page (the user-facing entry; WebKit also
     /// calls this flow via `webExtensionController(_:openOptionsPageFor:...)`).
     /// No-op if the extension id is unknown or the extension doesn't declare
@@ -2258,6 +2345,67 @@ final class ExtensionManager: NSObject, ObservableObject,
                 }
             }
         )
+    }
+
+    // MARK: - Side Panel Webview
+
+    /// Build a fully-wired WKWebView for the chrome.sidePanel drawer hosting
+    /// the extension's panel page at `path`. Returns nil when:
+    ///   * the extension id isn't known,
+    ///   * the path escapes the extension's directory (traversal guard),
+    ///   * the file can't be resolved on disk.
+    ///
+    /// Uses the extension's own `webViewConfiguration` so `chrome.*` APIs are
+    /// live inside the panel (same pattern as the options-page loader).
+    @available(macOS 15.5, *)
+    func makeSidePanelWebView(for extensionId: String, path: String) -> WKWebView? {
+        guard let context = extensionContexts[extensionId] else { return nil }
+        guard let installed = installedExtensions.first(where: { $0.id == extensionId }) else { return nil }
+
+        // Build the file URL relative to the package root, rejecting any
+        // traversal attempts (mirrors the options-page security check).
+        let extensionRoot = URL(fileURLWithPath: installed.packagePath, isDirectory: true)
+        let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let candidate = extensionRoot.appendingPathComponent(trimmed)
+        let resolvedRoot = extensionRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        let resolvedTarget = candidate.standardizedFileURL.resolvingSymlinksInPath().path
+        let rootPrefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
+        guard resolvedTarget == resolvedRoot || resolvedTarget.hasPrefix(rootPrefix) else {
+            Self.logger.error("SECURITY: sidePanel path escapes extension dir: path=\(path, privacy: .public)")
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: candidate.path) else {
+            Self.logger.error("sidePanel path not found on disk: \(candidate.path, privacy: .public)")
+            return nil
+        }
+
+        let config = context.webViewConfiguration
+            ?? BrowserConfiguration.shared.webViewConfiguration
+        if config.webExtensionController == nil, let c = extensionController {
+            config.webExtensionController = c
+        }
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.allowsBackForwardNavigationGestures = false
+        webView.isInspectable = true
+
+        // chrome alias for extensions that only check for `chrome` in the
+        // isolated environment (same as options-page flow).
+        let aliasScript = WKUserScript(
+            source: "if (typeof window.chrome === 'undefined' && typeof window.browser !== 'undefined') { try { window.chrome = window.browser; } catch (e) {} }",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        webView.configuration.userContentController.addUserScript(aliasScript)
+
+        let baseURL = context.baseURL
+        let targetURL = baseURL.appendingPathComponent(trimmed)
+        if targetURL.isFileURL {
+            webView.loadFileURL(targetURL, allowingReadAccessTo: extensionRoot)
+        } else {
+            webView.load(URLRequest(url: targetURL))
+        }
+        return webView
     }
 
     /// True when the extension declares an options page. Used by Settings UI
@@ -2672,8 +2820,17 @@ final class ExtensionManager: NSObject, ObservableObject,
     func notifyTabOpened(_ tab: Tab) {
         guard let bm = browserManagerRef, let controller = extensionController
         else { return }
+        // Dedup: `didOpenTab` triggers a fresh content-script injection pass
+        // in WKWebExtension. Calling it more than once per tab duplicates the
+        // extension's content scripts (observed as e.g. the Zoom extension
+        // injecting its "Make it a Zoom Meeting" button multiple times on
+        // Google Calendar). We guard here so every entry point (attach loop,
+        // TabManager.addTab, Tab.setupWebView, reattach) is safe without
+        // having to track the flag externally.
+        if tab.didNotifyOpenToExtensions { return }
         let a = adapter(for: tab, browserManager: bm)
         controller.didOpenTab(a)
+        tab.didNotifyOpenToExtensions = true
     }
 
     /// Grant all extension contexts explicit access to a URL.
@@ -2684,6 +2841,26 @@ final class ExtensionManager: NSObject, ObservableObject,
     func grantExtensionAccessToURL(_ url: URL) {
         for (_, ctx) in extensionContexts {
             ctx.setPermissionStatus(.grantedExplicitly, for: url)
+        }
+    }
+
+    /// Pre-warm background service workers for any extension whose match
+    /// patterns cover this URL. WKWebExtension's auto-wake on `runtime.sendMessage`
+    /// can race with document_end content script injection; proactively
+    /// waking before navigation avoids dropped first messages.
+    @available(macOS 15.5, *)
+    func warmBackgroundIfNeeded(for url: URL) {
+        for (_, ctx) in extensionContexts {
+            guard ctx.webExtension.hasBackgroundContent else { continue }
+            // Cheap heuristic: only wake when any requested match pattern
+            // matches this URL. Avoids waking every background on every
+            // navigation.
+            let patterns = ctx.webExtension.allRequestedMatchPatterns
+            let matches = patterns.contains { pattern in
+                pattern.matches(url, options: [])
+            }
+            guard matches else { continue }
+            ctx.loadBackgroundContent { _ in /* best effort */ }
         }
     }
 
@@ -3343,10 +3520,31 @@ final class ExtensionManager: NSObject, ObservableObject,
             return
         }
 
+        let firstURL = configuration.tabURLs.first
+
+        // Popup windows: Chrome's `chrome.windows.create({type: 'popup'})` is
+        // how extensions like Zoom spawn their sign-in / auxiliary UI.
+        // Shoehorning these into tabs (or worse, whole new spaces) breaks
+        // that flow because the extension's own logic expects a dedicated
+        // window it can close independently. Open a real NSWindow and host
+        // a webview with the extension's own webViewConfiguration so its
+        // chrome.runtime / chrome.storage state matches the main popup.
+        if configuration.windowType == .popup {
+            presentExtensionPopupWindow(
+                url: firstURL,
+                configuration: configuration,
+                extensionContext: extensionContext
+            )
+            if windowAdapter == nil {
+                windowAdapter = ExtensionWindowAdapter(browserManager: bm)
+            }
+            completionHandler(windowAdapter, nil)
+            return
+        }
+
         // OAuth flows from extensions should open in tabs to share the same data store
         // Miniwindows use separate data stores which breaks OAuth flows
-        if let firstURL = configuration.tabURLs.first,
-            OAuthDetector.isLikelyOAuthPopupURL(firstURL)
+        if let firstURL, OAuthDetector.isLikelyOAuthPopupURL(firstURL)
         {
             Self.logger.debug(
                 "🔐 [DELEGATE] Extension OAuth window detected, opening in new tab: \(firstURL.absoluteString)"
@@ -3368,7 +3566,7 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         // For regular extension windows, create a new space to emulate a separate window in our UI
         let newSpace = bm.tabManager.createSpace(name: "Window")
-        if let firstURL = configuration.tabURLs.first {
+        if let firstURL {
             _ = bm.tabManager.createNewTab(
                 url: firstURL.absoluteString,
                 in: newSpace
@@ -3384,6 +3582,109 @@ final class ExtensionManager: NSObject, ObservableObject,
         }
         Self.logger.info("Created new window (space): \(newSpace.name)")
         completionHandler(windowAdapter, nil)
+    }
+
+    /// Build and show an `NSWindow` hosting the extension's popup URL.
+    /// Used by `openNewWindowUsing` when the extension asks for
+    /// `windowType == .popup`. The window uses the extension's own
+    /// `webViewConfiguration` so `chrome.runtime` is live inside the popup,
+    /// which is what Zoom et al. rely on for their auth flows.
+    @available(macOS 15.5, *)
+    private func presentExtensionPopupWindow(
+        url: URL?,
+        configuration: WKWebExtension.WindowConfiguration,
+        extensionContext: WKWebExtensionContext
+    ) {
+        // Build the webview against the extension's config. Falls back to
+        // the shared config when the extension context doesn't expose its
+        // own (shouldn't happen on macOS 15.5+, but be defensive).
+        let config = extensionContext.webViewConfiguration
+            ?? BrowserConfiguration.shared.webViewConfiguration
+        if config.webExtensionController == nil, let c = extensionController {
+            config.webExtensionController = c
+        }
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.allowsBackForwardNavigationGestures = false
+        webView.isInspectable = true
+
+        // chrome alias for extensions that only check for `chrome` (same as
+        // options-page / side-panel flows).
+        let aliasJS = "if (typeof window.chrome === 'undefined' && typeof window.browser !== 'undefined') { try { window.chrome = window.browser; } catch (e) {} }"
+        webView.configuration.userContentController.addUserScript(
+            WKUserScript(source: aliasJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
+
+        // Apply frame hints from the extension's WindowConfiguration when
+        // they're real numbers. Chrome-style popups typically ship a
+        // modest default (500x750-ish); fall back to that when unspecified.
+        let hint = configuration.frame
+        let defaultWidth: CGFloat = 500
+        let defaultHeight: CGFloat = 700
+        let width = hint.size.width.isFinite && hint.size.width > 0 ? hint.size.width : defaultWidth
+        let height = hint.size.height.isFinite && hint.size.height > 0 ? hint.size.height : defaultHeight
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = extensionContext.webExtension.displayName ?? "Extension"
+        window.isReleasedWhenClosed = false
+        window.level = .normal
+
+        let container = NSView(frame: window.contentView?.bounds ?? .zero)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView = container
+
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: container.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        if let url {
+            if url.isFileURL,
+               let installed = extensionContext.webExtension.displayName.flatMap({ _ in
+                   installedExtensions.first(where: { extensionContexts[$0.id] === extensionContext })
+               }) {
+                let root = URL(fileURLWithPath: installed.packagePath, isDirectory: true)
+                webView.loadFileURL(url, allowingReadAccessTo: root)
+            } else {
+                webView.load(URLRequest(url: url))
+            }
+        }
+
+        // Track so we can release cleanly; drop from the map when the user
+        // closes the popup.
+        let token = UUID()
+        extensionPopupWindows[token] = window
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.extensionPopupWindows.removeValue(forKey: token)
+            if let obsToken = self.extensionPopupWindowObservers.removeValue(forKey: token) {
+                NotificationCenter.default.removeObserver(obsToken)
+            }
+        }
+        extensionPopupWindowObservers[token] = observer
+
+        // Position near the active window so users don't lose the popup
+        // off-screen when hint frame is missing/zeroed.
+        if hint.origin.x.isFinite && hint.origin.y.isFinite {
+            window.setFrameOrigin(NSPoint(x: hint.origin.x, y: hint.origin.y))
+        } else {
+            window.center()
+        }
+        window.makeKeyAndOrderFront(nil)
+        Self.logger.info("Presented extension popup window for '\(extensionContext.webExtension.displayName ?? "?", privacy: .public)' url=\(url?.absoluteString ?? "(none)", privacy: .public)")
     }
 
     // MARK: - Native Messaging Support

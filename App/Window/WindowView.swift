@@ -183,7 +183,8 @@ struct WindowView: View {
         let sidebarVisible = windowState.isSidebarVisible && !windowState.isFocusModeEnabled
         let sidebarOnRight = socketSettings.sidebarPosition == .right
         let sidebarOnLeft = socketSettings.sidebarPosition == .left
-        
+        let sidePanelVisible = windowState.activeSidePanelExtensionId != nil && !windowState.isFocusModeEnabled
+
         HStack(spacing: 0) {
             if aiAppearsOnTrailingEdge {
                 SpacesSidebar()
@@ -191,7 +192,13 @@ struct WindowView: View {
                 if aiVisible {
                     AISidebar()
                 }
+                if sidePanelVisible {
+                    ExtensionSidePanel()
+                }
             } else {
+                if sidePanelVisible {
+                    ExtensionSidePanel()
+                }
                 if aiVisible {
                     AISidebar()
                 }
@@ -201,8 +208,8 @@ struct WindowView: View {
         }
         // Apply padding similar to regular sidebar: remove padding when sidebar/AI is visible on that side
         // When sidebar is on left, AI appears on right (trailing); when sidebar is on right, AI appears on left (leading)
-        .padding(.trailing, (sidebarVisible && sidebarOnRight) || (aiVisible && sidebarOnLeft) ? 0 : 8)
-        .padding(.leading, (sidebarVisible && sidebarOnLeft) || (aiVisible && sidebarOnRight) ? 0 : 8)
+        .padding(.trailing, (sidebarVisible && sidebarOnRight) || ((aiVisible || sidePanelVisible) && sidebarOnLeft) ? 0 : 8)
+        .padding(.leading, (sidebarVisible && sidebarOnLeft) || ((aiVisible || sidePanelVisible) && sidebarOnRight) ? 0 : 8)
     }
 
     @ViewBuilder
@@ -282,6 +289,22 @@ struct WindowView: View {
         }
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func ExtensionSidePanel() -> some View {
+        if #available(macOS 15.5, *),
+           let extId = windowState.activeSidePanelExtensionId,
+           let path = windowState.activeSidePanelPath {
+            ExtensionSidePanelView(extensionId: extId, path: path)
+                .frame(width: windowState.sidePanelWidth)
+                .transition(
+                    .move(edge: socketSettings.sidebarPosition == .left ? .trailing : .leading)
+                    .combined(with: .opacity)
+                )
+                .environmentObject(browserManager)
+                .environment(windowState)
+        }
     }
 
     @ViewBuilder
