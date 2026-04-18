@@ -1,14 +1,24 @@
 name: Nightly Build
 
+# No Apple Developer Program required — we ad-hoc sign the binary and use
+# Sparkle's EdDSA signatures for update integrity. Users see a one-time
+# Gatekeeper prompt on first install but auto-updates are cryptographically
+# verified. See `.github/gh-pages-seed/README.md` for user-facing bypass
+# instructions and `.github/scripts/generate-keys.py` for key generation.
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  # Serialize nightlies so overlapping pushes don't race on the gh-pages push.
   group: nightly-build
   cancel-in-progress: false
+
+env:
+  # Pin Sparkle release for the sign_update tool. Keep in sync with whatever
+  # version SPM resolves in Package.resolved.
+  SPARKLE_VERSION: "2.6.4"
 
 jobs:
   nightly:
@@ -27,8 +37,6 @@ jobs:
           COMMIT_COUNT=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
           DATE=$(date -u +%Y%m%d)
-          # Unique per-commit identifier so same-day builds don't collide
-          # on the release tag. DATE+COMMIT_COUNT is monotonic across time.
           SHORT_VERSION="1.1.0-nightly.${DATE}.${COMMIT_COUNT}+${SHORT_SHA}"
           BUILD_NUMBER="${COMMIT_COUNT}"
           RELEASE_TAG="nightly-${DATE}-${COMMIT_COUNT}"
@@ -46,87 +54,22 @@ jobs:
           sed -i '' "s/CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = ${BUILD_NUMBER};/" \
             Socket.xcodeproj/project.pbxproj
 
-      - name: Import Developer ID certificate
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          printf "%s" "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > signing_certificate.p12
-          security create-keychain -p "" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "" build.keychain
-          security import signing_certificate.p12 -k build.keychain \
-            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s build.keychain login.keychain
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
-          IDENTITY=$(security find-identity -v -p codesigning build.keychain \
-            | grep "Developer ID Application" | head -n1 | awk '{print $2}')
-          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-
-      - name: Build app
-        env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Build app (ad-hoc signed)
         run: |
           set -e
           mkdir -p build
-          ENTITLEMENTS="$(pwd)/Socket/Socket.entitlements"
+          # Ad-hoc signing (-) means the app has a valid code signature with
+          # no team identity. Apple Silicon won't launch completely unsigned
+          # binaries; ad-hoc is the minimum viable signature.
           xcodebuild -scheme Socket -configuration Release \
             -arch arm64 -derivedDataPath build \
-            CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            CODE_SIGN_IDENTITY="-" \
             CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_ENTITLEMENTS="$ENTITLEMENTS" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
           cp -R "build/Build/Products/Release/Socket.app" ./Socket.app
-
-      - name: Re-sign for notarization
-        run: |
-          SPARKLE="Socket.app/Contents/Frameworks/Sparkle.framework/Versions/B"
-          for bin in \
-            "$SPARKLE/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
-            "$SPARKLE/XPCServices/Installer.xpc/Contents/MacOS/Installer" \
-            "$SPARKLE/Updater.app/Contents/MacOS/Updater" \
-            "$SPARKLE/Autoupdate"; do
-            codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$bin"
-          done
-          for bundle in \
-            "$SPARKLE/XPCServices/Downloader.xpc" \
-            "$SPARKLE/XPCServices/Installer.xpc" \
-            "$SPARKLE/Updater.app"; do
-            codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$bundle"
-          done
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$SPARKLE/Sparkle"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime \
-            --entitlements "$(pwd)/Socket/Socket.entitlements" "Socket.app"
-
-      - name: Verify signature
-        run: codesign --verify --deep --strict --verbose=2 "Socket.app"
-
-      - name: Notarize app
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        run: |
-          xcrun notarytool store-credentials "socket-notary" \
-            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD"
-          ditto -c -k --keepParent "Socket.app" Socket.zip
-          SUBMIT_OUTPUT=$(xcrun notarytool submit "Socket.zip" \
-            --keychain-profile "socket-notary" --wait 2>&1)
-          echo "$SUBMIT_OUTPUT"
-          STATUS=$(echo "$SUBMIT_OUTPUT" | grep "^  status:" | awk '{print $2}')
-          if [ "$STATUS" != "Accepted" ]; then
-            SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "^  id:" | head -1 | awk '{print $2}')
-            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "socket-notary"
-            exit 1
-          fi
-
-      - name: Staple and verify
-        run: |
-          xcrun stapler staple "Socket.app"
-          codesign --verify --deep --strict --verbose=2 "Socket.app"
 
       - name: Create DMG
         run: |
@@ -135,14 +78,47 @@ jobs:
           SIZE=$(stat -f '%z' "${DMG_NAME}")
           echo "DMG_SIZE=$SIZE" >> "$GITHUB_ENV"
 
+      - name: Install Sparkle sign_update
+        run: |
+          curl -sSL \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz" \
+            -o /tmp/sparkle.tar.xz
+          mkdir -p /tmp/sparkle
+          tar -xJf /tmp/sparkle.tar.xz -C /tmp/sparkle
+          # Release archive lays things out as `bin/sign_update` at the root.
+          ls /tmp/sparkle/bin/
+          echo "SPARKLE_BIN=/tmp/sparkle/bin" >> "$GITHUB_ENV"
+
+      - name: Sign DMG with EdDSA
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_ED_PRIVATE_KEY secret is not set — generate it with .github/scripts/generate-keys.py and add to repo secrets."
+            exit 1
+          fi
+          # sign_update takes the private key file via -f. Use a mktemp so we
+          # don't accidentally write the key somewhere it gets archived.
+          KEY_FILE=$(mktemp)
+          printf "%s" "$SPARKLE_ED_PRIVATE_KEY" > "$KEY_FILE"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          # Output is like: sparkle:edSignature="AbCd..." length="12345678"
+          SIGN_OUTPUT=$("$SPARKLE_BIN/sign_update" -f "$KEY_FILE" "$DMG_NAME")
+          echo "sign_update output: $SIGN_OUTPUT"
+          ED_SIG=$(printf "%s" "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
+          if [ -z "$ED_SIG" ]; then
+            echo "::error::Failed to parse sparkle:edSignature from sign_update output"
+            exit 1
+          fi
+          echo "::add-mask::$ED_SIG"
+          echo "APPCAST_ED_SIGNATURE=$ED_SIG" >> "$GITHUB_ENV"
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.RELEASE_TAG }}
           path: ${{ env.DMG_NAME }}
 
-      # Stage appcast payload + seeds + helper script OUTSIDE the repo so the
-      # gh-pages checkout (which wipes the working tree) doesn't lose them.
       - name: Stage appcast assets
         run: |
           mkdir -p /tmp/appcast-staging
@@ -160,10 +136,9 @@ jobs:
             gh release create "${RELEASE_TAG}" "${DMG_NAME}" \
               --title "Nightly ${SHORT_VERSION}" \
               --prerelease \
-              --notes "Automated nightly build from main (commit ${{ github.sha }})."
+              --notes "Automated nightly build from main (commit ${{ github.sha }}). Unsigned — right-click → Open on first launch."
           fi
-          DMG_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${DMG_NAME}"
-          echo "DMG_URL=$DMG_URL" >> "$GITHUB_ENV"
+          echo "DMG_URL=https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${DMG_NAME}" >> "$GITHUB_ENV"
 
       - name: Update nightly appcast on gh-pages
         env:
@@ -172,7 +147,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Bootstrap gh-pages if this is the very first publish.
           if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
             git fetch origin gh-pages
             git checkout gh-pages
@@ -182,8 +156,6 @@ jobs:
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
-          # Ensure seed files are present. These define the RSS skeleton that
-          # update-appcast.py appends to; without them, Sparkle gets a 404.
           for f in appcast.xml appcast-nightly.xml index.html README.md; do
             if [ ! -f "$f" ]; then
               cp "/tmp/appcast-staging/seed/$f" "$f"

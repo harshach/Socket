@@ -37,6 +37,8 @@
 	<false/>
 	<key>SUFeedURL</key>
 	<string>https://harshach.github.io/Socket/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>QYzMAc6r7W78oGcP7Zn6OAmdP1+9maakUoXd/l2yl9s=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 	<key>SUUpdateRelaunchDelay</key>

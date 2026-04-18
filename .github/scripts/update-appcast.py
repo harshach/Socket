@@ -14,6 +14,10 @@ Environment variables:
   APPCAST_SHORT_VERSION Display version (sparkle:shortVersionString).
   APPCAST_DMG_SIZE      File size in bytes.
   APPCAST_RELEASE_NOTES Optional URL for <sparkle:releaseNotesLink>.
+  APPCAST_ED_SIGNATURE  Optional base64 EdDSA signature from Sparkle's
+                        sign_update. When set, emitted as the enclosure's
+                        `sparkle:edSignature` attribute — Sparkle clients
+                        with `SUPublicEDKey` set will reject updates without it.
   APPCAST_MAX_ITEMS     Optional int; trim to N most recent items (default 50).
 """
 from __future__ import annotations
@@ -39,6 +43,7 @@ def main() -> None:
     short_version = env("APPCAST_SHORT_VERSION")
     dmg_size = env("APPCAST_DMG_SIZE")
     notes_url = env("APPCAST_RELEASE_NOTES", required=False)
+    ed_signature = env("APPCAST_ED_SIGNATURE", required=False)
     max_items = int(env("APPCAST_MAX_ITEMS", required=False, default="50"))
 
     with open(path, encoding="utf-8") as f:
@@ -48,6 +53,7 @@ def main() -> None:
         f'      <sparkle:releaseNotesLink>{notes_url}</sparkle:releaseNotesLink>\n'
         if notes_url else ""
     )
+    ed_sig_line = f'        sparkle:edSignature="{ed_signature}"\n' if ed_signature else ""
     entry = (
         "    <item>\n"
         f"      <title>{title}</title>\n"
@@ -57,6 +63,7 @@ def main() -> None:
         f'        url="{dmg_url}"\n'
         f'        sparkle:version="{version}"\n'
         f'        sparkle:shortVersionString="{short_version}"\n'
+        f"{ed_sig_line}"
         f'        length="{dmg_size}"\n'
         '        type="application/octet-stream"/>\n'
         "    </item>\n"
