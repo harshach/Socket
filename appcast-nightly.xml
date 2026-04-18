@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Socket Browser Nightly</title>
+    <description>Automated nightly builds from the main branch. Expect regressions.</description>
+    <language>en</language>
+    <item>
+      <title>Nightly 1.1.0-nightly.20260418.17+fee27b8</title>
+      <pubDate>Sat, 18 Apr 2026 21:26:30 +0000</pubDate>
+      <enclosure
+        url="https://github.com/harshach/Socket/releases/download/nightly-20260418-17/Socket-nightly-20260418-17.dmg"
+        sparkle:version="17"
+        sparkle:shortVersionString="1.1.0-nightly.20260418.17+fee27b8"
+        sparkle:edSignature="np7tUrigSkR/9aLNKsDBrDp0VjVOVSjoYuc+OKAO6aMYEhgmvMSsnpUJBHPpddTSFQu8dAvs7ISVxuKAzYzLCg=="
+        length="21255095"
+        type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
