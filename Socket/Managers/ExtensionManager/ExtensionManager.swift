@@ -16,7 +16,7 @@ import WebKit
 @available(macOS 15.4, *)
 @MainActor
 final class ExtensionManager: NSObject, ObservableObject,
-    WKWebExtensionControllerDelegate, NSPopoverDelegate
+    WKWebExtensionControllerDelegate, NSPopoverDelegate, WKNavigationDelegate
 {
     static let shared = ExtensionManager()
     private static let logger = Logger(subsystem: "com.socket.browser", category: "Extensions")
@@ -50,6 +50,12 @@ final class ExtensionManager: NSObject, ObservableObject,
     private var extensionPopupWindowObservers: [UUID: NSObjectProtocol] = [:]
     // Stable adapters for tabs/windows used when notifying controller events
     private var tabAdapters: [UUID: ExtensionTabAdapter] = [:]
+    // Long-lived native messaging ports (1Password, Bitwarden, etc.) need a
+    // strong owner on the app side. The WKWebExtension.MessagePort only keeps
+    // our closures, not the NativeMessagingHandler instance that owns the
+    // host Process/pipes, so without this dictionary the handler can vanish
+    // immediately after connectUsingMessagePort returns.
+    private var nativeMessagingHandlers: [UUID: NativeMessagingHandler] = [:]
     internal var windowAdapter: ExtensionWindowAdapter?
     private weak var browserManagerRef: BrowserManager?
 
@@ -58,8 +64,10 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// its data store). Nil before the first window has called `attach`.
     var attachedBrowserManager: BrowserManager? { browserManagerRef }
     // Whether to auto-resize extension action popovers to content. Disabled per UX preference.
-    // UI delegate for popup context menus
-    private var popupUIDelegate: PopupUIDelegate?
+    // UI delegates for popup webviews. Keep strong refs while the WKWebView is alive.
+    private var popupUIDelegates: [ObjectIdentifier: PopupUIDelegate] = [:]
+    private var popupCompatibilityControllers: Set<ObjectIdentifier> = []
+    private let extensionUIWebViews = NSHashTable<WKWebView>.weakObjects()
     // No preference for action popups-as-tabs; keep native popovers per Apple docs
 
     let context: ModelContext
@@ -126,6 +134,8 @@ final class ExtensionManager: NSObject, ObservableObject,
         anchorObserverTokens.removeAll()
         actionAnchors.removeAll()
         tabAdapters.removeAll()
+        nativeMessagingHandlers.removeAll()
+        popupUIDelegates.removeAll()
         windowAdapter = nil
 
         if let controller = extensionController {
@@ -1057,14 +1067,185 @@ final class ExtensionManager: NSObject, ObservableObject,
 
     """
 
+    /// Marker that identifies a service worker we have downgraded from
+    /// `type: "module"` to a classic script. Written as a comment inside
+    /// the SW so we can detect prior conversion when re-patching.
+    private static let serviceWorkerModuleStripMarker = "// __SOCKET_SW_MODULE_STRIPPED_V1__"
+
+    /// Marker that identifies a service worker where we already rewrote
+    /// top-level ESM syntax into classic-script-compatible code.
+    private static let serviceWorkerESMCompatMarker = "// __SOCKET_SW_ESM_COMPAT_V1__"
+
+    /// Resolve an extension-relative module specifier to a file URL and
+    /// keep it confined to the extension package directory.
+    private func resolveExtensionModuleURL(
+        specifier: String,
+        packageDir: URL,
+        relativeTo baseURL: URL
+    ) -> URL? {
+        let resolvedURL: URL
+        if specifier.hasPrefix("/") {
+            resolvedURL = packageDir.appendingPathComponent(String(specifier.dropFirst()))
+        } else {
+            resolvedURL = URL(fileURLWithPath: specifier, relativeTo: baseURL).standardizedFileURL
+        }
+
+        let packageRoot = packageDir.standardizedFileURL.path
+        let candidate = resolvedURL.standardizedFileURL.path
+        guard candidate == packageRoot || candidate.hasPrefix(packageRoot + "/") else {
+            Self.logger.error("SW ESM rewrite blocked path traversal for specifier \(specifier, privacy: .public)")
+            return nil
+        }
+
+        return resolvedURL.standardizedFileURL
+    }
+
+    /// Inline simple `import foo from "./bar.js"` statements into a classic
+    /// script by wrapping the imported file in an IIFE and returning its
+    /// default export. This is intentionally narrow, but it covers the
+    /// single-line/minified pattern used by 1Password's MV3 worker.
+    private func rewriteClassicServiceWorkerESMSyntax(
+        source: String,
+        packageDir: URL,
+        serviceWorkerURL: URL
+    ) -> (source: String, changed: Bool) {
+        let importPattern = #"(^|[;\n\r])\s*import\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s*(['"])([^'"]+)\3\s*;?"#
+        let sideEffectImportPattern = #"(^|[;\n\r])\s*import\s+(['"])([^'"]+)\2\s*;?"#
+        let namedExportPattern = #"(^|[;\n\r])\s*export\s*\{[^{}]*\}\s*;?"#
+
+        guard let importRegex = try? NSRegularExpression(pattern: importPattern, options: [.anchorsMatchLines]),
+              let sideEffectImportRegex = try? NSRegularExpression(pattern: sideEffectImportPattern, options: [.anchorsMatchLines]),
+              let namedExportRegex = try? NSRegularExpression(pattern: namedExportPattern, options: [.anchorsMatchLines])
+        else {
+            return (source, false)
+        }
+
+        var rewritten = source
+        var changed = false
+        var importPassChanged = false
+
+        repeat {
+            importPassChanged = false
+            let matches = importRegex.matches(
+                in: rewritten,
+                range: NSRange(rewritten.startIndex..., in: rewritten)
+            )
+
+            for match in matches.reversed() {
+                guard match.numberOfRanges >= 5,
+                      let fullRange = Range(match.range, in: rewritten),
+                      let prefixRange = Range(match.range(at: 1), in: rewritten),
+                      let bindingRange = Range(match.range(at: 2), in: rewritten),
+                      let specifierRange = Range(match.range(at: 4), in: rewritten)
+                else { continue }
+
+                let prefix = String(rewritten[prefixRange])
+                let binding = String(rewritten[bindingRange])
+                let specifier = String(rewritten[specifierRange])
+
+                guard let moduleURL = resolveExtensionModuleURL(
+                    specifier: specifier,
+                    packageDir: packageDir,
+                    relativeTo: serviceWorkerURL.deletingLastPathComponent()
+                ) else { continue }
+
+                guard var moduleSource = try? String(contentsOf: moduleURL, encoding: .utf8) else {
+                    Self.logger.error("SW ESM rewrite could not read module \(moduleURL.path, privacy: .public)")
+                    continue
+                }
+
+                guard let exportRange = moduleSource.range(
+                    of: #"\bexport\s+default\b"#,
+                    options: .regularExpression
+                ) else {
+                    Self.logger.error("SW ESM rewrite skipped non-default module \(moduleURL.lastPathComponent, privacy: .public)")
+                    continue
+                }
+
+                moduleSource.replaceSubrange(exportRange, with: "return")
+                let replacement = """
+                \(prefix)const \(binding) = (() => {
+                \(moduleSource)
+                })();
+                """
+                rewritten.replaceSubrange(fullRange, with: replacement)
+                importPassChanged = true
+                changed = true
+            }
+        } while importPassChanged
+
+        let sideEffectMatches = sideEffectImportRegex.matches(
+            in: rewritten,
+            range: NSRange(rewritten.startIndex..., in: rewritten)
+        )
+
+        for match in sideEffectMatches.reversed() {
+            guard match.numberOfRanges >= 4,
+                  let fullRange = Range(match.range, in: rewritten),
+                  let prefixRange = Range(match.range(at: 1), in: rewritten),
+                  let specifierRange = Range(match.range(at: 3), in: rewritten)
+            else { continue }
+
+            let prefix = String(rewritten[prefixRange])
+            let specifier = String(rewritten[specifierRange])
+
+            guard let moduleURL = resolveExtensionModuleURL(
+                specifier: specifier,
+                packageDir: packageDir,
+                relativeTo: serviceWorkerURL.deletingLastPathComponent()
+            ) else { continue }
+
+            guard let moduleSource = try? String(contentsOf: moduleURL, encoding: .utf8) else {
+                Self.logger.error("SW ESM rewrite could not read side-effect module \(moduleURL.path, privacy: .public)")
+                continue
+            }
+
+            let replacement = """
+            \(prefix)(() => {
+            \(moduleSource)
+            })();
+            """
+            rewritten.replaceSubrange(fullRange, with: replacement)
+            changed = true
+        }
+
+        let exportMatches = namedExportRegex.matches(
+            in: rewritten,
+            range: NSRange(rewritten.startIndex..., in: rewritten)
+        )
+
+        for match in exportMatches.reversed() {
+            guard let fullRange = Range(match.range, in: rewritten),
+                  let prefixRange = Range(match.range(at: 1), in: rewritten)
+            else { continue }
+
+            let prefix = String(rewritten[prefixRange])
+            rewritten.replaceSubrange(fullRange, with: prefix)
+            changed = true
+        }
+
+        if changed && !rewritten.contains(Self.serviceWorkerESMCompatMarker) {
+            rewritten = Self.serviceWorkerESMCompatMarker + "\n" + rewritten
+        }
+
+        return (rewritten, changed)
+    }
+
     /// Read the manifest at `manifestURL`, find the MV3 service worker file,
-    /// and prepend `serviceWorkerPolyfill` (idempotent via the marker
-    /// comment). No-op for MV2 or extensions without a service worker.
+    /// and apply two compat passes (both idempotent):
+    ///   1. Prepend `serviceWorkerPolyfill` so chrome.offscreen / chrome.privacy
+    ///      stubs exist before the SW's own init runs.
+    ///   2. Rewrite remaining top-level ESM syntax into classic-script-
+    ///      compatible code and, if needed, strip `background.type:
+    ///      "module"` from the manifest. This specifically fixes minified
+    ///      bundles like 1Password where `import ...` / `export {...}`
+    ///      live on a single line and were previously missed by the
+    ///      line-based downgrade pass.
     private func patchServiceWorkerForCompat(packageDir: URL, manifestURL: URL) {
         guard let data = try? Data(contentsOf: manifestURL),
-              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+              var manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
-        guard let background = manifest["background"] as? [String: Any],
+        guard var background = manifest["background"] as? [String: Any],
               let swPath = background["service_worker"] as? String, !swPath.isEmpty
         else { return }
 
@@ -1074,18 +1255,52 @@ final class ExtensionManager: NSObject, ObservableObject,
             return
         }
 
-        // Idempotent: skip if our marker is already present anywhere in the
-        // first ~512 bytes (where we put it).
-        let probeLength = min(existing.count, 512)
-        let probe = String(existing.prefix(probeLength))
-        if probe.contains(Self.serviceWorkerPolyfillMarker) { return }
+        var swSource = existing
+        var swDirty = false
 
-        let patched = Self.serviceWorkerPolyfill + existing
+        // ----- Pass 1: prepend the polyfill (idempotent) ---------------------
+        let probe = String(existing.prefix(min(existing.count, 512)))
+        if !probe.contains(Self.serviceWorkerPolyfillMarker) {
+            swSource = Self.serviceWorkerPolyfill + swSource
+            swDirty = true
+        }
+
+        // ----- Pass 2: convert "type": "module" → classic SW -----------------
+        let isModule = (background["type"] as? String) == "module"
+        if isModule {
+            background.removeValue(forKey: "type")
+            manifest["background"] = background
+
+            // Persist the manifest change with `type: "module"` removed.
+            if let updatedManifestData = try? JSONSerialization.data(
+                withJSONObject: manifest,
+                options: [.prettyPrinted, .sortedKeys]
+            ) {
+                try? updatedManifestData.write(to: manifestURL)
+                Self.logger.info("Stripped 'type: module' from \(manifestURL.lastPathComponent, privacy: .public)'s background block")
+            }
+        }
+
+        let rewriteResult = rewriteClassicServiceWorkerESMSyntax(
+            source: swSource,
+            packageDir: packageDir,
+            serviceWorkerURL: swURL
+        )
+        if rewriteResult.changed {
+            swSource = rewriteResult.source
+            if !swSource.contains(Self.serviceWorkerModuleStripMarker) {
+                swSource = Self.serviceWorkerModuleStripMarker + "\n" + swSource
+            }
+            swDirty = true
+            Self.logger.info("Rewrote top-level ESM syntax in \(swURL.lastPathComponent, privacy: .public) for classic service-worker compatibility")
+        }
+
+        if !swDirty { return }
         do {
-            try patched.write(to: swURL, atomically: true, encoding: .utf8)
-            Self.logger.info("SW polyfill prepended to \(swURL.lastPathComponent, privacy: .public) for compat shims")
+            try swSource.write(to: swURL, atomically: true, encoding: .utf8)
+            Self.logger.info("SW patched: \(swURL.lastPathComponent, privacy: .public) (polyfill + classic-script downgrade)")
         } catch {
-            Self.logger.error("SW polyfill write failed for \(swURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            Self.logger.error("SW patch write failed for \(swURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -2474,16 +2689,7 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = false
-        webView.isInspectable = true
-
-        // chrome alias for extensions that only check for `chrome` in the
-        // isolated environment (same as options-page flow).
-        let aliasScript = WKUserScript(
-            source: "if (typeof window.chrome === 'undefined' && typeof window.browser !== 'undefined') { try { window.chrome = window.browser; } catch (e) {} }",
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        )
-        webView.configuration.userContentController.addUserScript(aliasScript)
+        preparePopupWebView(webView)
 
         let baseURL = context.baseURL
         let targetURL = baseURL.appendingPathComponent(trimmed)
@@ -2837,6 +3043,114 @@ final class ExtensionManager: NSObject, ObservableObject,
         PopupConsole.shared.show()
     }
 
+    private func preparePopupWebView(_ webView: WKWebView) {
+        popupUIDelegates = popupUIDelegates.filter { $0.value.webView != nil }
+        extensionUIWebViews.add(webView)
+
+        webView.isInspectable = true
+        webView.navigationDelegate = self
+
+        let userContentController = webView.configuration.userContentController
+        let controllerID = ObjectIdentifier(userContentController)
+        if popupCompatibilityControllers.insert(controllerID).inserted {
+            userContentController.addUserScript(
+                WKUserScript(
+                    source: SocketShimBridge.chromeCompatibilityJS,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: true
+                )
+            )
+        }
+
+        let key = ObjectIdentifier(webView)
+        let delegate: PopupUIDelegate
+        if let existing = popupUIDelegates[key] {
+            delegate = existing
+        } else {
+            delegate = PopupUIDelegate(webView: webView)
+            popupUIDelegates[key] = delegate
+        }
+
+        webView.uiDelegate = delegate
+        PopupConsole.shared.attach(to: webView)
+    }
+
+    func isExtensionUIWebView(_ webView: WKWebView) -> Bool {
+        extensionUIWebViews.allObjects.contains { $0 === webView }
+    }
+
+    private func nativeMessagingManifestSearchPaths(for applicationId: String) -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let manifestName = "\(applicationId).json"
+        let browserDirs = [
+            "Library/Application Support/Socket/NativeMessagingHosts",
+            "Library/Application Support/Google/Chrome/NativeMessagingHosts",
+            "Library/Application Support/Chromium/NativeMessagingHosts",
+            "Library/Application Support/Microsoft Edge/NativeMessagingHosts",
+            "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+            "Library/Application Support/Mozilla/NativeMessagingHosts",
+        ]
+
+        var paths: [URL] = []
+        for dir in browserDirs {
+            paths.append(home.appendingPathComponent(dir).appendingPathComponent(manifestName))
+            paths.append(URL(fileURLWithPath: "/\(dir)").appendingPathComponent(manifestName))
+        }
+        return paths
+    }
+
+    private func nativeMessagingManifestExists(for applicationId: String) -> Bool {
+        nativeMessagingManifestSearchPaths(for: applicationId).contains {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+    }
+
+    private func resolvedNativeMessagingApplicationId(
+        requestedApplicationId: String?,
+        for extensionContext: WKWebExtensionContext
+    ) -> String? {
+        let requested = requestedApplicationId?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let isOnePassword =
+            extensionContext.webExtension.displayName?
+            .localizedCaseInsensitiveContains("1Password") == true
+        let onePasswordCandidates = [
+            "com.1password.1password",
+            "com.1password.1password7",
+            "2bua8c4s2c.com.agilebits.1password",
+        ]
+
+        if !requested.isEmpty {
+            if nativeMessagingManifestExists(for: requested) || !isOnePassword {
+                return requested
+            }
+
+            if let fallback = onePasswordCandidates.first(where: {
+                nativeMessagingManifestExists(for: $0)
+            }) {
+                Self.logger.info(
+                    "[NativeMessaging] Falling back from \(requested, privacy: .public) to \(fallback, privacy: .public) for \(extensionContext.webExtension.displayName ?? "?", privacy: .public)"
+                )
+                return fallback
+            }
+
+            return requested
+        }
+
+        guard isOnePassword,
+              let fallback = onePasswordCandidates.first(where: {
+                  nativeMessagingManifestExists(for: $0)
+              })
+        else {
+            return nil
+        }
+
+        Self.logger.info(
+            "[NativeMessaging] Resolved empty host id to \(fallback, privacy: .public) for \(extensionContext.webExtension.displayName ?? "?", privacy: .public)"
+        )
+        return fallback
+    }
+
     // Action popups remain popovers; options page behavior adjusted below
 
     /// Connect the browser manager so we can expose tabs/windows and present UI.
@@ -2861,23 +3175,14 @@ final class ExtensionManager: NSObject, ObservableObject,
             let allTabs =
                 browserManager.tabManager.pinnedTabs
                 + browserManager.tabManager.tabs
-            for tab in allTabs where !tab.isUnloaded {
-                let tabAdapter = self.adapter(
-                    for: tab,
-                    browserManager: browserManager
-                )
-                controller.didOpenTab(tabAdapter)
+            for tab in allTabs where tab.hasAssignedPrimaryWebView {
+                notifyTabOpened(tab)
             }
 
             // Notify about current active tab only if it has a webview
             if let currentTab = browserManager.currentTabForActiveWindow(),
-               !currentTab.isUnloaded {
-                let tabAdapter = self.adapter(
-                    for: currentTab,
-                    browserManager: browserManager
-                )
-                controller.didActivateTab(tabAdapter, previousActiveTab: nil)
-                controller.didSelectTabs([tabAdapter])
+               currentTab.hasAssignedPrimaryWebView {
+                notifyTabActivated(newTab: currentTab, previous: nil)
             }
 
             Self.logger.info("Attached to browser manager with \(allTabs.count) tabs")
@@ -2914,6 +3219,11 @@ final class ExtensionManager: NSObject, ObservableObject,
     func notifyTabOpened(_ tab: Tab) {
         guard let bm = browserManagerRef, let controller = extensionController
         else { return }
+        // Wait until the tab has a real primary webview assignment. Calling
+        // didOpenTab earlier makes WKWebExtension cache a tab whose adapter
+        // still reports no webView, which breaks content-script injection and
+        // runtime messaging for that tab.
+        guard tab.hasAssignedPrimaryWebView else { return }
         // Dedup: `didOpenTab` triggers a fresh content-script injection pass
         // in WKWebExtension. Calling it more than once per tab duplicates the
         // extension's content scripts (observed as e.g. the Zoom extension
@@ -2962,8 +3272,11 @@ final class ExtensionManager: NSObject, ObservableObject,
     func notifyTabActivated(newTab: Tab, previous: Tab?) {
         guard let bm = browserManagerRef, let controller = extensionController
         else { return }
+        guard newTab.hasAssignedPrimaryWebView else { return }
         let newA = adapter(for: newTab, browserManager: bm)
-        let oldA = previous.map { adapter(for: $0, browserManager: bm) }
+        let oldA = previous.flatMap {
+            $0.hasAssignedPrimaryWebView ? adapter(for: $0, browserManager: bm) : nil
+        }
         controller.didActivateTab(newA, previousActiveTab: oldA)
         controller.didSelectTabs([newA])
         if let oldA { controller.didDeselectTabs([oldA]) }
@@ -3087,7 +3400,7 @@ final class ExtensionManager: NSObject, ObservableObject,
         popover.behavior = .transient
 
         if let webView = action.popupWebView {
-            webView.isInspectable = true
+            self.preparePopupWebView(webView)
         }
 
         // Present the popover on main thread
@@ -3701,13 +4014,7 @@ final class ExtensionManager: NSObject, ObservableObject,
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = false
         webView.isInspectable = true
-
-        // chrome alias for extensions that only check for `chrome` (same as
-        // options-page / side-panel flows).
-        let aliasJS = "if (typeof window.chrome === 'undefined' && typeof window.browser !== 'undefined') { try { window.chrome = window.browser; } catch (e) {} }"
-        webView.configuration.userContentController.addUserScript(
-            WKUserScript(source: aliasJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        )
+        preparePopupWebView(webView)
 
         // Apply frame hints from the extension's WindowConfiguration when
         // they're real numbers. Chrome-style popups typically ship a
@@ -3805,9 +4112,25 @@ final class ExtensionManager: NSObject, ObservableObject,
             return
         }
 
+        guard let resolvedApplicationId = resolvedNativeMessagingApplicationId(
+            requestedApplicationId: applicationId,
+            for: extensionContext
+        ) else {
+            Self.logger.error("[NativeMessaging] No application identifier available for '\(extensionContext.webExtension.displayName ?? "?", privacy: .public)'")
+            replyHandler(
+                nil,
+                NSError(
+                    domain: "NativeMessaging",
+                    code: 7,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing native messaging host identifier"]
+                )
+            )
+            return
+        }
+
         // Single-shot message handling
         let handler = NativeMessagingHandler(
-            applicationId: applicationId,
+            applicationId: resolvedApplicationId,
             extensionId: extensionContext.uniqueIdentifier
         )
         handler.sendMessage(message) { response, error in
@@ -3818,24 +4141,33 @@ final class ExtensionManager: NSObject, ObservableObject,
     @available(macOS 15.5, *)
     func webExtensionController(
         _ controller: WKWebExtensionController,
-        connectUsingMessagePort port: WKWebExtension.MessagePort,
+        connectUsing port: WKWebExtension.MessagePort,
         for extensionContext: WKWebExtensionContext
-    ) {
-        guard let applicationId = port.applicationIdentifier else {
+    ) async throws {
+        guard let applicationId = resolvedNativeMessagingApplicationId(
+            requestedApplicationId: port.applicationIdentifier,
+            for: extensionContext
+        ) else {
             Self.logger.error("[NativeMessaging] Port connection missing application identifier")
-            return
+            port.disconnect()
+            throw NSError(
+                domain: "NativeMessaging",
+                code: 8,
+                userInfo: [NSLocalizedDescriptionKey: "Missing native messaging host identifier"]
+            )
         }
-        
-        
+        let handlerID = UUID()
         let handler = NativeMessagingHandler(
             applicationId: applicationId,
             extensionId: extensionContext.uniqueIdentifier
         )
+        handler.disconnectObserver = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.nativeMessagingHandlers.removeValue(forKey: handlerID)
+            }
+        }
+        nativeMessagingHandlers[handlerID] = handler
         handler.connect(port: port)
-
-        // Keep a strong reference to the handler if needed, but usually the port delegate handles lifecycle
-        // For now, we rely on the port retaining the delegate or the handler retaining itself via the port relationship
-        // (Note: In a production app, we might need to manage these references in a set)
     }
 
 
@@ -3899,20 +4231,14 @@ final class ExtensionManager: NSObject, ObservableObject,
         webView.allowsBackForwardNavigationGestures = true
         webView.isInspectable = true
         // No navigation delegate needed for options page
+        extensionUIWebViews.add(webView)
 
-        // Provide a lightweight alias to help extensions that only check `chrome`.
-        // This only affects the options page web view, not normal websites.
-        let aliasJS = """
-            if (typeof window.chrome === 'undefined' && typeof window.browser !== 'undefined') {
-              try { window.chrome = window.browser; } catch (e) {}
-            }
-            """
-        let aliasScript = WKUserScript(
-            source: aliasJS,
+        let compatScript = WKUserScript(
+            source: SocketShimBridge.chromeCompatibilityJS,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         )
-        webView.configuration.userContentController.addUserScript(aliasScript)
+        webView.configuration.userContentController.addUserScript(compatScript)
 
         // SECURITY FIX: Load the options page with restricted file access
         if optionsURL.isFileURL {
@@ -4570,6 +4896,7 @@ class NativeMessagingHandler: NSObject {
     private static let logger = Logger(subsystem: "com.socket.browser", category: "NativeMessaging")
     let applicationId: String
     let extensionId: String
+    var disconnectObserver: (() -> Void)?
     private var process: Process?
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
@@ -4801,11 +5128,16 @@ class NativeMessagingHandler: NSObject {
     }
     
     private func terminateProcess() {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminate()
         process = nil
         inputPipe = nil
         outputPipe = nil
         errorPipe = nil
+        port = nil
+        disconnectObserver?()
+        disconnectObserver = nil
     }
     
     private func writeMessage(_ message: Any) throws {

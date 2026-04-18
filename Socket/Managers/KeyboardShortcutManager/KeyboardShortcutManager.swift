@@ -8,6 +8,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import WebKit
 
 @MainActor
 @Observable
@@ -209,6 +210,48 @@ class KeyboardShortcutManager {
         return true
     }
 
+    private func focusedWebView() -> WKWebView? {
+        guard let firstResponder = NSApp.keyWindow?.firstResponder else {
+            return nil
+        }
+
+        var responder: NSResponder? = firstResponder
+        var visited = Set<ObjectIdentifier>()
+
+        while let current = responder {
+            let currentID = ObjectIdentifier(current)
+            guard visited.insert(currentID).inserted else { break }
+
+            if let webView = current as? WKWebView {
+                return webView
+            }
+
+            if let view = current as? NSView {
+                var ancestor: NSView? = view
+                while let candidate = ancestor {
+                    if let webView = candidate as? WKWebView {
+                        return webView
+                    }
+                    ancestor = candidate.superview
+                }
+            }
+
+            responder = current.nextResponder
+        }
+
+        return nil
+    }
+
+    private func isExtensionUIFocused() -> Bool {
+        guard #available(macOS 15.4, *),
+              let webView = focusedWebView()
+        else {
+            return false
+        }
+
+        return ExtensionManager.shared.isExtensionUIWebView(webView)
+    }
+
     private func shouldHandleModifierlessShortcut(_ keyCombination: KeyCombination) -> Bool {
         let hasExplicitCommandModifiers =
             keyCombination.modifiers.contains(.command) ||
@@ -221,6 +264,7 @@ class KeyboardShortcutManager {
         guard sigmaCommandModeEnabled else { return false }
         guard browserManager?.dialogManager.isVisible != true else { return false }
         guard !isNativeTextInputFocused() else { return false }
+        guard !isExtensionUIFocused() else { return false }
         guard windowRegistry?.activeWindow?.isInsertModeEnabled != true else { return false }
         guard !websiteShortcutDetector.isEditableElementFocused else { return false }
         return true

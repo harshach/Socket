@@ -19,6 +19,9 @@ class SocketSettingsService {
     private let tabUnloadTimeoutKey = "settings.tabUnloadTimeout"
     private let blockXSTKey = "settings.blockCrossSiteTracking"
     private let debugToggleUpdateNotificationKey = "settings.debugToggleUpdateNotification"
+    /// Mirrors `AppDelegate.updateChannelKey` — kept in sync so Sparkle's
+    /// `feedURLString(for:)` delegate and this service read the same value.
+    private let updateChannelKey = "settings.updateChannel"
     private let askBeforeQuitKey = "settings.askBeforeQuit"
     private let sidebarPositionKey = "settings.sidebarPosition"
     private let topBarAddressViewKey = "settings.topBarAddressView"
@@ -137,6 +140,20 @@ class SocketSettingsService {
     var debugToggleUpdateNotification: Bool {
         didSet {
             userDefaults.set(debugToggleUpdateNotification, forKey: debugToggleUpdateNotificationKey)
+        }
+    }
+
+    /// Sparkle feed selection. Changing this posts `.updateChannelChanged`
+    /// so AppDelegate can call `updater.resetUpdateCycle()` — without that,
+    /// Sparkle would keep polling the old feed until the next 24h check.
+    var updateChannel: UpdateChannel {
+        didSet {
+            userDefaults.set(updateChannel.rawValue, forKey: updateChannelKey)
+            NotificationCenter.default.post(
+                name: .updateChannelChanged,
+                object: nil,
+                userInfo: ["channel": updateChannel.rawValue]
+            )
         }
     }
 
@@ -259,6 +276,7 @@ class SocketSettingsService {
             tabUnloadTimeoutKey: 3600.0,
             blockXSTKey: false,
             debugToggleUpdateNotificationKey: false,
+            updateChannelKey: UpdateChannel.stable.rawValue,
             askBeforeQuitKey: true,
             sidebarPositionKey: SidebarPosition.left.rawValue,
             topBarAddressViewKey: true,
@@ -301,6 +319,9 @@ class SocketSettingsService {
         self.tabUnloadTimeout = userDefaults.double(forKey: tabUnloadTimeoutKey)
         self.blockCrossSiteTracking = userDefaults.bool(forKey: blockXSTKey)
         self.debugToggleUpdateNotification = userDefaults.bool(forKey: debugToggleUpdateNotificationKey)
+        self.updateChannel = UpdateChannel(
+            rawValue: userDefaults.string(forKey: updateChannelKey) ?? UpdateChannel.stable.rawValue
+        ) ?? .stable
         self.askBeforeQuit = userDefaults.bool(forKey: askBeforeQuitKey)
         self.sidebarPosition = SidebarPosition(rawValue: userDefaults.string(forKey: sidebarPositionKey) ?? "left") ?? SidebarPosition.left
         self.topBarAddressView = userDefaults.object(forKey: topBarAddressViewKey) as? Bool ?? true

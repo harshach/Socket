@@ -5,6 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  # Serialize nightlies so overlapping pushes don't race on the gh-pages push.
+  group: nightly-build
+  cancel-in-progress: false
+
 jobs:
   nightly:
     runs-on: macos-26
@@ -20,16 +25,26 @@ jobs:
       - name: Set nightly version info
         run: |
           COMMIT_COUNT=$(git rev-list --count HEAD)
-          DATE=$(date +%Y%m%d)
-          SHORT_VERSION="1.1.0-nightly.${DATE}"
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          DATE=$(date -u +%Y%m%d)
+          # Unique per-commit identifier so same-day builds don't collide
+          # on the release tag. DATE+COMMIT_COUNT is monotonic across time.
+          SHORT_VERSION="1.1.0-nightly.${DATE}.${COMMIT_COUNT}+${SHORT_SHA}"
           BUILD_NUMBER="${COMMIT_COUNT}"
-          echo "SHORT_VERSION=$SHORT_VERSION" >> $GITHUB_ENV
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_ENV
-          echo "Building nightly: $SHORT_VERSION (build $BUILD_NUMBER)"
+          RELEASE_TAG="nightly-${DATE}-${COMMIT_COUNT}"
+          DMG_NAME="Socket-nightly-${DATE}-${COMMIT_COUNT}.dmg"
+          {
+            echo "SHORT_VERSION=$SHORT_VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+            echo "RELEASE_TAG=$RELEASE_TAG"
+            echo "DMG_NAME=$DMG_NAME"
+          } >> "$GITHUB_ENV"
+          echo "Building nightly: $SHORT_VERSION (tag $RELEASE_TAG)"
 
-          # Update version in project
-          sed -i '' "s/MARKETING_VERSION = .*/MARKETING_VERSION = ${SHORT_VERSION};/" Socket.xcodeproj/project.pbxproj
-          sed -i '' "s/CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = ${BUILD_NUMBER};/" Socket.xcodeproj/project.pbxproj
+          sed -i '' "s/MARKETING_VERSION = .*/MARKETING_VERSION = ${SHORT_VERSION};/" \
+            Socket.xcodeproj/project.pbxproj
+          sed -i '' "s/CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = ${BUILD_NUMBER};/" \
+            Socket.xcodeproj/project.pbxproj
 
       - name: Import Developer ID certificate
         env:
@@ -40,11 +55,13 @@ jobs:
           security create-keychain -p "" build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p "" build.keychain
-          security import signing_certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import signing_certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s build.keychain login.keychain
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
-          IDENTITY=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | head -n1 | awk '{print $2}')
-          echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain \
+            | grep "Developer ID Application" | head -n1 | awk '{print $2}')
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build app
         env:
@@ -65,16 +82,23 @@ jobs:
       - name: Re-sign for notarization
         run: |
           SPARKLE="Socket.app/Contents/Frameworks/Sparkle.framework/Versions/B"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/XPCServices/Installer.xpc/Contents/MacOS/Installer"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/Updater.app/Contents/MacOS/Updater"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/Autoupdate"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/XPCServices/Downloader.xpc"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/XPCServices/Installer.xpc"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE/Updater.app"
+          for bin in \
+            "$SPARKLE/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
+            "$SPARKLE/XPCServices/Installer.xpc/Contents/MacOS/Installer" \
+            "$SPARKLE/Updater.app/Contents/MacOS/Updater" \
+            "$SPARKLE/Autoupdate"; do
+            codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$bin"
+          done
+          for bundle in \
+            "$SPARKLE/XPCServices/Downloader.xpc" \
+            "$SPARKLE/XPCServices/Installer.xpc" \
+            "$SPARKLE/Updater.app"; do
+            codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$bundle"
+          done
           codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$SPARKLE/Sparkle"
           codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$SPARKLE"
-          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime --entitlements "$(pwd)/Socket/Socket.entitlements" "Socket.app"
+          codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime \
+            --entitlements "$(pwd)/Socket/Socket.entitlements" "Socket.app"
 
       - name: Verify signature
         run: codesign --verify --deep --strict --verbose=2 "Socket.app"
@@ -86,9 +110,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           xcrun notarytool store-credentials "socket-notary" \
-            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD"
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
           ditto -c -k --keepParent "Socket.app" Socket.zip
-          SUBMIT_OUTPUT=$(xcrun notarytool submit "Socket.zip" --keychain-profile "socket-notary" --wait 2>&1)
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "Socket.zip" \
+            --keychain-profile "socket-notary" --wait 2>&1)
           echo "$SUBMIT_OUTPUT"
           STATUS=$(echo "$SUBMIT_OUTPUT" | grep "^  status:" | awk '{print $2}')
           if [ "$STATUS" != "Accepted" ]; then
@@ -105,65 +131,81 @@ jobs:
       - name: Create DMG
         run: |
           hdiutil create -volname "Socket Nightly ${SHORT_VERSION}" \
-            -srcfolder "Socket.app" -ov -format UDZO "Socket-nightly-${SHORT_VERSION}.dmg"
+            -srcfolder "Socket.app" -ov -format UDZO "${DMG_NAME}"
+          SIZE=$(stat -f '%z' "${DMG_NAME}")
+          echo "DMG_SIZE=$SIZE" >> "$GITHUB_ENV"
 
-      - name: Upload as artifact
+      - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Socket-nightly-${{ env.SHORT_VERSION }}
-          path: Socket-nightly-*.dmg
+          name: ${{ env.RELEASE_TAG }}
+          path: ${{ env.DMG_NAME }}
 
-      - name: Update nightly appcast
+      # Stage appcast payload + seeds + helper script OUTSIDE the repo so the
+      # gh-pages checkout (which wipes the working tree) doesn't lose them.
+      - name: Stage appcast assets
         run: |
-          DMG_NAME="Socket-nightly-${SHORT_VERSION}.dmg"
-          # Upload DMG to a nightly pre-release
-          gh release create "nightly-${SHORT_VERSION}" "${DMG_NAME}" \
-            --title "Nightly ${SHORT_VERSION}" \
-            --prerelease --notes "Automated nightly build from main branch" \
-            || gh release upload "nightly-${SHORT_VERSION}" "${DMG_NAME}" --clobber
-          DMG_URL="https://github.com/${{ github.repository }}/releases/download/nightly-${SHORT_VERSION}/${DMG_NAME}"
-          DATE=$(date -R)
+          mkdir -p /tmp/appcast-staging
+          cp "${DMG_NAME}" "/tmp/appcast-staging/${DMG_NAME}"
+          cp -R .github/gh-pages-seed /tmp/appcast-staging/seed
+          cp .github/scripts/update-appcast.py /tmp/appcast-staging/
 
-          git fetch origin gh-pages || true
-          git checkout gh-pages || git checkout --orphan gh-pages
-
-          # Create appcast-nightly.xml if it doesn't exist
-          if [ ! -f appcast-nightly.xml ]; then
-            cat > appcast-nightly.xml << 'INITEOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-            <channel>
-              <title>Socket Browser Nightly</title>
-            </channel>
-          </rss>
-          INITEOF
-          fi
-
-          ENTRY=$(cat << XMLEOF
-              <item>
-                <title>Nightly ${SHORT_VERSION}</title>
-                <pubDate>${DATE}</pubDate>
-                <enclosure
-                  url="${DMG_URL}"
-                  sparkle:version="${BUILD_NUMBER}"
-                  sparkle:shortVersionString="${SHORT_VERSION}"
-                  type="application/octet-stream"/>
-              </item>
-          XMLEOF
-          )
-
-          python3 -c "
-          import sys
-          content = open('appcast-nightly.xml').read()
-          entry = sys.argv[1]
-          content = content.replace('</channel>', entry + '\n  </channel>', 1)
-          open('appcast-nightly.xml', 'w').write(content)
-          " "$ENTRY"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add appcast-nightly.xml
-          git commit -m "Nightly ${SHORT_VERSION}" || true
-          git push origin gh-pages
+      - name: Publish pre-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${DMG_NAME}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${DMG_NAME}" \
+              --title "Nightly ${SHORT_VERSION}" \
+              --prerelease \
+              --notes "Automated nightly build from main (commit ${{ github.sha }})."
+          fi
+          DMG_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${DMG_NAME}"
+          echo "DMG_URL=$DMG_URL" >> "$GITHUB_ENV"
+
+      - name: Update nightly appcast on gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Bootstrap gh-pages if this is the very first publish.
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages
+            git checkout gh-pages
+          else
+            echo "Bootstrapping gh-pages branch…"
+            git checkout --orphan gh-pages
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          # Ensure seed files are present. These define the RSS skeleton that
+          # update-appcast.py appends to; without them, Sparkle gets a 404.
+          for f in appcast.xml appcast-nightly.xml index.html README.md; do
+            if [ ! -f "$f" ]; then
+              cp "/tmp/appcast-staging/seed/$f" "$f"
+              echo "Seeded $f"
+            fi
+          done
+
+          PUBDATE=$(date -R)
+          APPCAST_PATH=appcast-nightly.xml \
+          APPCAST_TITLE="Nightly ${SHORT_VERSION}" \
+          APPCAST_PUBDATE="${PUBDATE}" \
+          APPCAST_DMG_URL="${DMG_URL}" \
+          APPCAST_VERSION="${BUILD_NUMBER}" \
+          APPCAST_SHORT_VERSION="${SHORT_VERSION}" \
+          APPCAST_DMG_SIZE="${DMG_SIZE}" \
+          APPCAST_MAX_ITEMS=30 \
+            python3 /tmp/appcast-staging/update-appcast.py
+
+          git add appcast.xml appcast-nightly.xml index.html README.md
+          if git diff --cached --quiet; then
+            echo "No appcast changes to commit."
+          else
+            git commit -m "Nightly ${SHORT_VERSION}"
+            git push origin gh-pages
+          fi

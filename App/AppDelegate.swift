@@ -27,10 +27,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private static let log = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Socket", category: "AppTermination")
 
-    /// Update channel: "stable" or "nightly"
+    /// Update channel: "stable" or "nightly". Selected in Settings → Advanced → Updates.
     static let updateChannelKey = "settings.updateChannel"
-    private static let stableFeedURL = "https://socket-browser.github.io/socket/appcast.xml"
-    private static let nightlyFeedURL = "https://socket-browser.github.io/socket/appcast-nightly.xml"
+    /// GitHub Pages URL for the stable appcast. Published by `.github/workflows/macos-notarize.yml`.
+    static let stableFeedURL = "https://harshach.github.io/Socket/appcast.xml"
+    /// GitHub Pages URL for the nightly appcast. Published by `.github/workflows/nightly.yml`.
+    static let nightlyFeedURL = "https://harshach.github.io/Socket/appcast-nightly.xml"
 
     // TEMPORARY: Reference to BrowserManager for coordinating browser operations
     // TODO: Replace with direct access to independent managers (TabManager, etc.)
@@ -63,6 +65,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupURLEventHandling()
         setupMouseButtonHandling()
+        setupUpdateChannelObserver()
+        // Eagerly kick the lazy so Sparkle's scheduled-check timer actually
+        // starts. Without this reference, `SPUStandardUpdaterController` never
+        // initializes until the user manually picks "Check for Updates", so
+        // `SUEnableAutomaticChecks` / `SUScheduledCheckInterval` from Info.plist
+        // have no effect.
+        _ = updaterController
         let didFinishOnboarding = userDefaults.bool(forKey: "settings.didFinishOnboarding")
         DispatchQueue.main.async { [weak self] in
             self?.surfacePrimaryWindow(didFinishOnboarding: didFinishOnboarding)
@@ -394,4 +403,51 @@ extension AppDelegate {
         let channel = UserDefaults.standard.string(forKey: Self.updateChannelKey) ?? "stable"
         return channel == "nightly" ? Self.nightlyFeedURL : Self.stableFeedURL
     }
+
+    /// Subscribe to `.updateChannelChanged` so Sparkle re-reads the feed URL
+    /// and re-schedules immediately after the user flips Stable ↔ Nightly in
+    /// Settings (instead of waiting for the next 24h poll).
+    fileprivate func setupUpdateChannelObserver() {
+        NotificationCenter.default.addObserver(
+            forName: .updateChannelChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            // resetUpdateCycle() tears down and rebuilds the Sparkle timer,
+            // forcing a fresh call to feedURLString(for:) on the next check.
+            self.updaterController.updater.resetUpdateCycle()
+        }
+    }
+}
+
+/// Channel the Sparkle updater pulls appcasts from. Persisted as a raw string
+/// in `UserDefaults[AppDelegate.updateChannelKey]`.
+enum UpdateChannel: String, CaseIterable, Identifiable {
+    case stable
+    case nightly
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .stable: return "Stable"
+        case .nightly: return "Nightly"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .stable:
+            return "Weekly releases, tagged on main. Recommended for everyday use."
+        case .nightly:
+            return "Fresh builds from every push to main. May be unstable; expect regressions."
+        }
+    }
+}
+
+extension Notification.Name {
+    /// Posted when the user flips the update channel in Settings so Sparkle
+    /// can reset its polling cycle and pick up the new feed URL.
+    static let updateChannelChanged = Notification.Name("updateChannelChanged")
 }

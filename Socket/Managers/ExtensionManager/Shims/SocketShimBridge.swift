@@ -27,6 +27,211 @@ final class SocketShimBridge: NSObject, WKScriptMessageHandlerWithReply {
 
     private override init() { super.init() }
 
+    /// Chrome-compatible facade for extension contexts that only expose
+    /// `browser.*`. A direct `window.chrome = window.browser` alias breaks
+    /// callback-style extensions like 1Password and Zoom because Firefox-style
+    /// Promise APIs do not accept Chrome's trailing callback contract.
+    static let chromeCompatibilityJS: String = """
+    (function() {
+      var existingChrome = window.chrome;
+      if (existingChrome && existingChrome.runtime && typeof existingChrome.runtime.id === 'string') {
+        return;
+      }
+      if (typeof window.browser === 'undefined') return;
+      if (window.__socketChromeCompatInstalled) return;
+      window.__socketChromeCompatInstalled = true;
+
+      var browserRoot = window.browser;
+      var lastErrorValue = null;
+      var proxyCache = new WeakMap();
+      var wrapperCache = new WeakMap();
+
+      function toErrorObject(error) {
+        if (!error) return null;
+        if (typeof error === 'object' && typeof error.message === 'string') {
+          return { message: error.message };
+        }
+        return { message: String(error) };
+      }
+
+      function setLastError(error) {
+        lastErrorValue = toErrorObject(error);
+      }
+
+      function clearLastErrorSoon() {
+        setTimeout(function() {
+          lastErrorValue = null;
+        }, 0);
+      }
+
+      function isEventObject(value) {
+        return !!value
+          && typeof value === 'object'
+          && typeof value.addListener === 'function'
+          && typeof value.removeListener === 'function';
+      }
+
+      function wrapFunction(owner, fn, propName) {
+        var cacheKey = owner && typeof owner === 'object' ? owner : fn;
+        var ownerCache = wrapperCache.get(cacheKey);
+        if (!ownerCache) {
+          ownerCache = Object.create(null);
+          wrapperCache.set(cacheKey, ownerCache);
+        }
+        if (ownerCache[propName]) {
+          return ownerCache[propName];
+        }
+
+        var wrapper = function() {
+          if (
+            propName === 'addListener'
+            || propName === 'removeListener'
+            || propName === 'hasListener'
+            || propName === 'hasListeners'
+          ) {
+            return fn.apply(owner, arguments);
+          }
+
+          var args = Array.prototype.slice.call(arguments);
+          var callback = null;
+          if (args.length && typeof args[args.length - 1] === 'function') {
+            callback = args.pop();
+          }
+
+          var result;
+          try {
+            result = fn.apply(owner, args);
+          } catch (error) {
+            if (callback) {
+              setLastError(error);
+              try {
+                callback();
+              } finally {
+                clearLastErrorSoon();
+              }
+              return;
+            }
+            throw error;
+          }
+
+          if (!callback) {
+            return result;
+          }
+
+          if (result && typeof result.then === 'function') {
+            return result.then(function(value) {
+              setLastError(null);
+              try {
+                callback(value);
+              } finally {
+                clearLastErrorSoon();
+              }
+              return value;
+            }).catch(function(error) {
+              setLastError(error);
+              try {
+                callback();
+              } finally {
+                clearLastErrorSoon();
+              }
+              return undefined;
+            });
+          }
+
+          setLastError(null);
+          try {
+            callback(result);
+          } finally {
+            clearLastErrorSoon();
+          }
+          return result;
+        };
+
+        ownerCache[propName] = wrapper;
+        return wrapper;
+      }
+
+      function proxify(target, path) {
+        if (!target || (typeof target !== 'object' && typeof target !== 'function')) {
+          return target;
+        }
+        if (proxyCache.has(target)) {
+          return proxyCache.get(target);
+        }
+
+        var proxy = new Proxy(target, {
+          get: function(obj, prop) {
+            if (path === 'runtime' && prop === 'lastError') {
+              return lastErrorValue;
+            }
+
+            var value = obj[prop];
+            if (typeof value === 'function') {
+              if (isEventObject(obj)) {
+                return value.bind(obj);
+              }
+              return wrapFunction(obj, value, String(prop));
+            }
+
+            if (value && typeof value === 'object') {
+              var childPath = path ? path + '.' + String(prop) : String(prop);
+              return proxify(value, childPath);
+            }
+
+            return value;
+          },
+          set: function(obj, prop, value) {
+            if (path === 'runtime' && prop === 'lastError') {
+              lastErrorValue = value;
+              return true;
+            }
+            obj[prop] = value;
+            return true;
+          },
+          has: function(obj, prop) {
+            if (path === 'runtime' && prop === 'lastError') {
+              return true;
+            }
+            return prop in obj;
+          },
+          ownKeys: function(obj) {
+            var keys = Reflect.ownKeys(obj);
+            if (path === 'runtime' && keys.indexOf('lastError') === -1) {
+              keys.push('lastError');
+            }
+            return keys;
+          },
+          getOwnPropertyDescriptor: function(obj, prop) {
+            if (path === 'runtime' && prop === 'lastError') {
+              return {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: lastErrorValue
+              };
+            }
+            return Object.getOwnPropertyDescriptor(obj, prop);
+          }
+        });
+
+        proxyCache.set(target, proxy);
+        return proxy;
+      }
+
+      var chromeRoot = proxify(browserRoot, '');
+      try {
+        window.chrome = chromeRoot;
+      } catch (_) {}
+
+      if (chromeRoot && chromeRoot.browserAction == null && chromeRoot.action != null) {
+        chromeRoot.browserAction = chromeRoot.action;
+      }
+      if (chromeRoot && chromeRoot.pageAction == null && chromeRoot.action != null) {
+        chromeRoot.pageAction = chromeRoot.action;
+      }
+    })();
+    """
+
     // MARK: - WKScriptMessageHandlerWithReply
 
     func userContentController(
@@ -77,12 +282,10 @@ final class SocketShimBridge: NSObject, WKScriptMessageHandlerWithReply {
       if (window.__socketShimsInstalled) return;
       window.__socketShimsInstalled = true;
 
+      \(chromeCompatibilityJS)
+
       var chromeNs = window.chrome;
-      if (typeof chromeNs === 'undefined') {
-        // Some extension contexts only expose `browser`. Alias so shims can
-        // install onto a stable name; the browser global is a separate object.
-        chromeNs = window.chrome = window.browser;
-      }
+      if (typeof chromeNs === 'undefined') return;
 
       function currentExtensionId() {
         try {

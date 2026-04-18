@@ -262,6 +262,7 @@ final class TrackingProtectionManager: ObservableObject {
     static let shieldsContentWorld = WKContentWorld.world(name: "SocketShields")
     private let thirdPartyCookieMarker = "document.requestStorageAccess = function()"
     private let genericCleanupSelectors: [String] = [
+        // Cookie / consent banners
         "#onetrust-banner-sdk",
         ".ot-sdk-container",
         ".fc-consent-root",
@@ -272,9 +273,33 @@ final class TrackingProtectionManager: ObservableObject {
         "[aria-label='cookie banner']",
         "[data-testid*='cookie']",
         "[data-cookiebanner]",
-        "[class*='advertisement']",
-        "[class*='sponsored']",
-        "[data-testid='ad']"
+
+        // Ad containers — ONLY unambiguous ad-tech markers. Broad
+        // `[class*='ad-']` style patterns are deliberately omitted because
+        // they false-positive on legitimate content (e.g. `class="add-to-cart"`,
+        // `class="header"`, etc.).
+        "[id^='div-gpt-ad']",          // Google Publisher Tags — always an ad
+        "[id*='google_ads_iframe']",   // Google ads iframe
+        "[data-ad-slot]",              // AdSense — required attribute on ad slots
+        "[data-google-query-id]",      // GAM tracking attribute
+        "ins.adsbygoogle",             // AdSense markup convention
+        "[class*='adsbygoogle']",      // same
+
+        // Iframes resolving to known ad-tech hostnames. Each pattern is a
+        // unique-to-ads domain — no false-positive risk because no
+        // first-party site embeds these hosts for legitimate content.
+        "iframe[src*='googletagservices']",
+        "iframe[src*='googlesyndication']",
+        "iframe[src*='doubleclick.net']",
+        "iframe[src*='googleads.g.doubleclick']",
+        "iframe[src*='amazon-adsystem']",
+        "iframe[src*='adservice.google']",
+        "iframe[src*='adnxs.com']",
+        "iframe[src*='pubmatic.com']",
+        "iframe[src*='rubiconproject.com']",
+        "iframe[src*='criteo.com']",
+        "iframe[src*='taboola.com']",
+        "iframe[src*='outbrain.com']",
     ]
     private let scriptletPolicy = ScriptletPolicy.conservative
 
@@ -911,9 +936,7 @@ final class TrackingProtectionManager: ObservableObject {
         (function() {
           try {
             const selectors = \(selectorsJSON);
-            if (!Array.isArray(selectors) || selectors.length === 0) {
-              return 0;
-            }
+            const hasSelectors = Array.isArray(selectors) && selectors.length > 0;
 
             if (window.__socketShieldsCleanupObserver) {
               try { window.__socketShieldsCleanupObserver.disconnect(); } catch (e) {}
@@ -922,25 +945,120 @@ final class TrackingProtectionManager: ObservableObject {
             const seen = new WeakSet();
             let hiddenCount = 0;
 
+            const hideNode = (node) => {
+              if (!node || seen.has(node)) return;
+              seen.add(node);
+              hiddenCount += 1;
+              try {
+                node.style.setProperty('display', 'none', 'important');
+                node.style.setProperty('visibility', 'hidden', 'important');
+                node.setAttribute('data-socket-shields-hidden', '1');
+              } catch (e) {}
+            };
+
             const applyCleanup = () => {
-              selectors.forEach((selector) => {
-                try {
-                  document.querySelectorAll(selector).forEach((node) => {
-                    if (!seen.has(node)) {
-                      seen.add(node);
-                      hiddenCount += 1;
-                    }
-                    node.style.setProperty('display', 'none', 'important');
-                    node.style.setProperty('visibility', 'hidden', 'important');
-                    node.setAttribute('data-socket-shields-hidden', '1');
-                  });
-                } catch (e) {}
-              });
+              if (hasSelectors) {
+                selectors.forEach((selector) => {
+                  try {
+                    document.querySelectorAll(selector).forEach(hideNode);
+                  } catch (e) {}
+                });
+              }
               return hiddenCount;
             };
 
+            // Element-collapse pass: when WKContentRuleList kills a network
+            // request, the placeholder iframe/img is still in the DOM and
+            // reserves layout space (the visible white box on ad-heavy
+            // pages). Walk every iframe/img that loaded with no content,
+            // climb to its container, and hide the whole thing — same
+            // behaviour Brave/uBlock Origin call "element collapsing".
+            const COLLAPSE_THRESHOLD_PX = 20;
+            // Strict ad-container test — only matches markers that are
+            // *exclusively* used for advertising containers. We deliberately
+            // avoid matching loose substrings like 'banner' or 'promo'
+            // because they appear on legitimate site furniture (hero
+            // banners, promotion blocks). False-positives here would hide
+            // real content; we'd rather leave a tiny bit of whitespace.
+            const adAttrPattern = /(?:^|[\\s_-])(?:advertisement|advertising|advertorial|adsense|adsbygoogle|adslot|adunit|adcontainer|adwrapper)(?:$|[\\s_-])|^div-gpt-ad|google_ads_iframe/;
+            const isLikelyAdContainer = (el) => {
+              if (!el || el === document.body || el === document.documentElement) return false;
+              const cls = (el.className && typeof el.className === 'string') ? el.className.toLowerCase() : '';
+              const id = (el.id || '').toLowerCase();
+              if (adAttrPattern.test(cls)) return true;
+              if (adAttrPattern.test(id)) return true;
+              if (el.hasAttribute && (el.hasAttribute('data-ad-slot') || el.hasAttribute('data-google-query-id'))) return true;
+              return false;
+            };
+            const findAdContainer = (start) => {
+              // Walk up looking for an UNAMBIGUOUS ad container. If we
+              // can't find one within 4 hops, return null and leave the
+              // wrapper alone. This keeps empty-but-legitimate embeds from
+              // collapsing page structure.
+              let el = start;
+              for (let depth = 0; depth < 5 && el && el !== document.body; depth += 1) {
+                if (isLikelyAdContainer(el)) return el;
+                el = el.parentElement;
+              }
+              return null;
+            };
+            // Iframe `src` patterns we treat as definitively-an-ad even when
+            // we can't peek at their contentDocument (cross-origin). When
+            // WKContentRuleList kills the request, the iframe element
+            // stays in the DOM with these src strings — collapsing the
+            // wrapper reclaims the layout space.
+            const AD_HOST_PATTERN = /(googletagservices|googlesyndication|doubleclick\\.net|googleads\\.g\\.doubleclick|amazon-adsystem|adservice\\.google|adnxs\\.com|pubmatic\\.com|rubiconproject\\.com|criteo|taboola|outbrain|adsystem|adform)/i;
+
+            const collapseEmpties = () => {
+              try {
+                document.querySelectorAll('iframe, img').forEach((el) => {
+                  if (seen.has(el)) return;
+                  // Skip elements with negligible footprint.
+                  const r = el.getBoundingClientRect();
+                  if (r.width < COLLAPSE_THRESHOLD_PX && r.height < COLLAPSE_THRESHOLD_PX) return;
+
+                  const adContainer = findAdContainer(el);
+                  let blocked = false;
+                  let collapseTarget = adContainer;
+                  if (el.tagName === 'IMG') {
+                    // Broken images are only safe to collapse when they're
+                    // inside an explicitly ad-marked container.
+                    blocked = !!adContainer && el.complete && el.naturalWidth === 0 && el.naturalHeight === 0;
+                  } else if (el.tagName === 'IFRAME') {
+                    const src = (el.getAttribute('src') || '').trim();
+                    // 1) Known ad-tech host in src — collapse regardless of
+                    //    cross-origin opacity.
+                    if (AD_HOST_PATTERN.test(src)) {
+                      blocked = true;
+                      collapseTarget = adContainer || el;
+                    } else {
+                      // 2) Same-origin / no-src iframes: only collapse when
+                      //    an explicit ad marker exists nearby. Blank iframes
+                      //    are common in legitimate widgets and login flows.
+                      if (adContainer) {
+                        try {
+                          blocked = (el.contentDocument && !el.contentDocument.body)
+                                 || src === '' || src === 'about:blank';
+                        } catch (e) {
+                          // Cross-origin without an ad-host match — leave alone.
+                          blocked = false;
+                        }
+                      }
+                    }
+                  }
+
+                  if (!blocked || !collapseTarget) return;
+                  hideNode(collapseTarget);
+                });
+              } catch (e) {}
+            };
+
             applyCleanup();
-            const observer = new MutationObserver(() => { applyCleanup(); });
+            collapseEmpties();
+            const observer = new MutationObserver(() => {
+              applyCleanup();
+              collapseEmpties();
+            });
             observer.observe(document.documentElement || document.body, {
               subtree: true,
               childList: true,

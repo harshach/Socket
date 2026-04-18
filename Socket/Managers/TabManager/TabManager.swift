@@ -1221,24 +1221,15 @@ class TabManager: ObservableObject {
         }
         let sid = targetSpace?.id
 
-        // Get existing tabs and increment their indices to make room for new tab at top
         let existingTabs = sid.flatMap { tabsBySpace[$0] } ?? []
-        let incrementedTabs = existingTabs.map { tab in
-            tab.index += 1
-            return tab
-        }
-
-        // Update the tabs array with incremented indices
-        if let sid = sid {
-            setTabs(incrementedTabs, for: sid)
-        }
+        let nextIndex = (existingTabs.map { $0.index }.max() ?? -1) + 1
 
         let newTab = Tab(
             url: validURL,
             name: provisionalTabName(for: validURL),
             favicon: "globe",
             spaceId: sid,
-            index: 0, // New tabs get index 0 to appear at top
+            index: nextIndex,
             browserManager: browserManager
         )
         addTab(newTab)
@@ -1302,24 +1293,15 @@ class TabManager: ObservableObject {
         }
         let sid = targetSpace?.id
 
-        // Get existing tabs and increment their indices to make room for new tab at top
         let existingTabs = sid.flatMap { tabsBySpace[$0] } ?? []
-        let incrementedTabs = existingTabs.map { tab in
-            tab.index += 1
-            return tab
-        }
-
-        // Update the tabs array with incremented indices
-        if let sid = sid {
-            setTabs(incrementedTabs, for: sid)
-        }
+        let nextIndex = (existingTabs.map { $0.index }.max() ?? -1) + 1
 
         let newTab = Tab(
             url: validURL,
             name: provisionalTabName(for: validURL),
             favicon: "globe",
             spaceId: sid,
-            index: 0, // New tabs get index 0 to appear at top
+            index: nextIndex,
             browserManager: browserManager,
             existingWebView: existingWebView
         )
@@ -2487,17 +2469,6 @@ extension TabManager {
         // The WebView should only be created when the window actually displays the tab
         // if let ct = self.currentTab { _ = ct.webView }
         
-        // Inform the extension controller about existing tabs and the active tab
-        if #available(macOS 15.5, *) {
-            for t in (self.pinnedTabs + spacePinned + self.tabs) where t.didNotifyOpenToExtensions == false {
-                ExtensionManager.shared.notifyTabOpened(t)
-                t.didNotifyOpenToExtensions = true
-            }
-            if let current = self.currentTab {
-                ExtensionManager.shared.notifyTabActivated(newTab: current, previous: nil)
-            }
-        }
-
         // After reattaching, ensure gradient matches the restored current space.
         if let space = self.currentSpace {
             bm.refreshGradientsForSpace(space, animate: false)

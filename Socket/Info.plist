@@ -36,7 +36,7 @@
 	<key>SUEnableDowngrade</key>
 	<false/>
 	<key>SUFeedURL</key>
-	<string>https://socket-browser.github.io/Socket/appcast.xml</string>
+	<string>https://harshach.github.io/Socket/appcast.xml</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 	<key>SUUpdateRelaunchDelay</key>

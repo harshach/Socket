@@ -1884,6 +1884,8 @@ struct AdvancedSettingsView: View {
         @Bindable var settings = socketSettings
         return
         VStack(alignment: .leading, spacing: 16) {
+            UpdateSettingsCard()
+
             #if DEBUG
             SettingsSectionCard(
                 title: "Debug Options",
@@ -1905,6 +1907,61 @@ struct AdvancedSettingsView: View {
             #endif
         }
         .padding()
+    }
+}
+
+/// Updates card: channel picker + "Check Now". Lives under Settings → Advanced.
+private struct UpdateSettingsCard: View {
+    @EnvironmentObject var browserManager: BrowserManager
+    @Environment(\.socketSettings) var socketSettings
+
+    private var currentVersion: String {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–"
+        return "\(short) (\(build))"
+    }
+
+    var body: some View {
+        @Bindable var settings = socketSettings
+        SettingsSectionCard(
+            title: "Updates",
+            subtitle: "Choose how often Socket checks for new versions"
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Current version")
+                    Spacer()
+                    Text(currentVersion)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Release channel").font(.subheadline).fontWeight(.medium)
+                    Picker("", selection: $settings.updateChannel) {
+                        ForEach(UpdateChannel.allCases) { channel in
+                            Text(channel.displayName).tag(channel)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    Text(settings.updateChannel.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Button("Check for Updates") {
+                        browserManager.installPendingUpdateIfAvailable()
+                    }
+                    Spacer()
+                }
+            }
+        }
     }
 }
 

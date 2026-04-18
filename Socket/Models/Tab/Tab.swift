@@ -332,7 +332,14 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         
         _webView = webView
         primaryWindowId = windowId
-        
+
+        if #available(macOS 15.5, *) {
+            ExtensionManager.shared.notifyTabOpened(self)
+            if browserManager?.currentTabForActiveWindow()?.id == self.id {
+                ExtensionManager.shared.notifyTabActivated(newTab: self, previous: nil)
+            }
+        }
+
         print("🔍 [MEMDEBUG]   -> Primary window assigned: \(windowId.uuidString.prefix(8))")
     }
 
@@ -959,7 +966,6 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             if browserManager?.currentTabForActiveWindow()?.id == self.id {
                 ExtensionManager.shared.notifyTabActivated(newTab: self, previous: nil)
             }
-            didNotifyOpenToExtensions = true
         }
         // For popup-hosting tabs, don't trigger an initial navigation. WebKit will
         // drive the load into this returned webView from createWebViewWith:.
@@ -2081,13 +2087,15 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.pageBackgroundColor = themeColor
                 webView.underPageBackgroundColor = themeColor
-                // Update sampled domain even for theme color
-                if shouldSample {
-                    self?.lastSampledDomain = currentDomain
-                }
             }
-        } else if shouldSample {
-            // Only extract via pixel sampling if domain changed
+        }
+
+        if shouldSample {
+            // Even when WebKit exposes a themeColor, keep running the more
+            // specific page-background extractor once per domain. themeColor
+            // is often a good first paint, but some sites without a true
+            // page theme report a dark fallback here, which regresses the
+            // visible gutters compared to Safari/Brave.
             extractBackgroundColorWithJavaScript(from: webView)
         }
     }
