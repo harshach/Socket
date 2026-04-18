@@ -58,10 +58,13 @@ jobs:
         run: |
           set -e
           mkdir -p build
-          # Ad-hoc signing (-) means the app has a valid code signature with
-          # no team identity. Apple Silicon won't launch completely unsigned
-          # binaries; ad-hoc is the minimum viable signature.
-          xcodebuild -scheme Socket -configuration Release \
+          # `-project Socket.xcodeproj` is required because the repo still
+          # carries a stale `Nook.xcodeproj` from an earlier rename, which
+          # makes xcodebuild's project autodetect ambiguous.
+          # Ad-hoc signing (-) gives Apple Silicon a valid signature to
+          # launch from without requiring a Developer ID.
+          xcodebuild -project Socket.xcodeproj \
+            -scheme Socket -configuration Release \
             -arch arm64 -derivedDataPath build \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGN_STYLE=Manual \

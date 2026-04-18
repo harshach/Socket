@@ -41,8 +41,11 @@ jobs:
         run: |
           set -e
           mkdir -p build
+          # `-project Socket.xcodeproj` is required because the repo still
+          # carries a stale `Nook.xcodeproj` from an earlier rename.
           echo "Attempting universal build (arm64 + x86_64)..."
-          if ! xcodebuild -scheme Socket -configuration Release \
+          if ! xcodebuild -project Socket.xcodeproj \
+            -scheme Socket -configuration Release \
             -arch arm64 -arch x86_64 \
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="-" \
@@ -52,7 +55,8 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""; then
             echo "Universal build failed, retrying Apple Silicon only..."
-            xcodebuild -scheme Socket -configuration Release \
+            xcodebuild -project Socket.xcodeproj \
+              -scheme Socket -configuration Release \
               -arch arm64 \
               -derivedDataPath build \
               CODE_SIGN_IDENTITY="-" \
