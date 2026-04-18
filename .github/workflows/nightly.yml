@@ -49,9 +49,15 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Building nightly: $SHORT_VERSION (tag $RELEASE_TAG)"
 
-          sed -i '' "s/MARKETING_VERSION = .*/MARKETING_VERSION = ${SHORT_VERSION};/" \
+          # MARKETING_VERSION must be double-quoted in pbxproj when the
+          # value contains characters that aren't valid unquoted identifiers
+          # (here: `-` and `+` from the nightly version string). Without
+          # the quotes, xcodebuild reports "The project ... is damaged".
+          # We also use `|` as the sed delimiter so `+` in the replacement
+          # can't collide with a regex metacharacter.
+          sed -i '' "s|MARKETING_VERSION = .*|MARKETING_VERSION = \"${SHORT_VERSION}\";|" \
             Socket.xcodeproj/project.pbxproj
-          sed -i '' "s/CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = ${BUILD_NUMBER};/" \
+          sed -i '' "s|CURRENT_PROJECT_VERSION = .*|CURRENT_PROJECT_VERSION = ${BUILD_NUMBER};|" \
             Socket.xcodeproj/project.pbxproj
 
       - name: Build app (ad-hoc signed)
