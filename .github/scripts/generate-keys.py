@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Generate a Sparkle EdDSA keypair compatible with sign_update / SUPublicEDKey.
 
-Sparkle uses libsodium's Ed25519 format:
-  - Private key (64 bytes): 32-byte seed ∥ 32-byte public key
-  - Public key (32 bytes): raw Ed25519 public key
+Sparkle's sign_update expects the private key as a base64-encoded 32-byte
+Ed25519 seed — matching the `generate_keys -x` export format from Sparkle's
+own tooling. (Earlier libsodium-style 64-byte seed∥public-key files are
+rejected by sign_update with "Imported key must be 64 bytes or 96 bytes ...
+Instead it is 64 bytes decoded.")
 
-Both are reported base64-encoded. Paste the private key into a GitHub secret
-named `SPARKLE_ED_PRIVATE_KEY` and the public key into `Socket/Info.plist`
-under the `SUPublicEDKey` key — the app will refuse Sparkle updates that
-aren't signed by the matching private key.
+  - Private key file: base64 of 32-byte Ed25519 seed — paste into the
+    `SPARKLE_ED_PRIVATE_KEY` GitHub secret.
+  - Public key:       base64 of 32-byte Ed25519 public key — paste into
+    `Socket/Info.plist` under `SUPublicEDKey`. The app refuses updates not
+    signed by the matching private key.
 
-Requires `cryptography` (Python package). Install with:
-    python3 -m pip install --user cryptography
-or on macOS with system Python:
+Requires `cryptography`:
     python3 -m pip install --break-system-packages cryptography
 
 Run once, locally:
@@ -45,10 +46,9 @@ def main() -> None:
         format=serialization.PublicFormat.Raw,
     )
 
-    # Sparkle's sign_update expects the 64-byte libsodium secret key format.
-    sparkle_priv = seed + pub
-
-    priv_b64 = base64.b64encode(sparkle_priv).decode()
+    # Sparkle's sign_update wants a base64'd 32-byte seed (matches the
+    # output of `generate_keys -x`). Not the 64-byte libsodium format.
+    priv_b64 = base64.b64encode(seed).decode()
     pub_b64 = base64.b64encode(pub).decode()
 
     print("=" * 72)

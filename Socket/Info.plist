@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -38,7 +38,7 @@
 	<key>SUFeedURL</key>
 	<string>https://harshach.github.io/Socket/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>QYzMAc6r7W78oGcP7Zn6OAmdP1+9maakUoXd/l2yl9s=</string>
+	<string>I/pPdoJI8XYJZR4ICRfJMaivV+yHQCJ1GUsPzTgCbLs=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 	<key>SUUpdateRelaunchDelay</key>
