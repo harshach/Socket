@@ -69,6 +69,17 @@ private struct SettingsContent: View {
             .tag(SettingsTabs.privacy)
 
             SettingsPane {
+                PasswordsSettingsView()
+            }
+            .tabItem {
+                Label(
+                    SettingsTabs.passwords.name,
+                    systemImage: SettingsTabs.passwords.icon
+                )
+            }
+            .tag(SettingsTabs.passwords)
+
+            SettingsPane {
                 ProfilesSettingsView()
             }
             .tabItem {

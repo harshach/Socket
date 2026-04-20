@@ -3278,6 +3278,28 @@ extension Tab: WKNavigationDelegate {
 
 }
 
+// MARK: - WKScriptMessageHandlerWithReply (passwordAutofillRequest)
+extension Tab: WKScriptMessageHandlerWithReply {
+    public func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        switch message.name {
+        case "passwordAutofillRequest":
+            browserManager?.passwordManager.handleAutofillRequest(
+                message.body,
+                tab: self,
+                reply: { value, error in
+                    replyHandler(value, error)
+                }
+            )
+        default:
+            replyHandler(nil, "Unhandled message: \(message.name)")
+        }
+    }
+}
+
 // MARK: - WKScriptMessageHandler
 extension Tab: WKScriptMessageHandler {
     public func userContentController(
@@ -3371,9 +3393,15 @@ extension Tab: WKScriptMessageHandler {
 
         case "SocketIdentity":
             handleOAuthRequest(message: message)
-            
+
         case "socketShortcutDetect":
             handleShortcutDetection(message: message)
+
+        case "passwordFormDetected":
+            browserManager?.passwordManager.handleFormDetected(message.body, tab: self)
+
+        case "passwordFormSubmitted":
+            browserManager?.passwordManager.handleFormSubmitted(message.body, tab: self)
 
         default:
             break

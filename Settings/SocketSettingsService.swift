@@ -46,6 +46,9 @@ class SocketSettingsService {
     private let didFinishOnboardingKey = "settings.didFinishOnboarding"
     private let tabLayoutKey = "settings.tabLayout"
     private let customSearchEnginesKey = "settings.customSearchEngines"
+    private let syncPasswordsToICloudKey = "settings.syncPasswordsToICloud"
+    private let passwordSaveDisabledHostsKey = "settings.passwordSaveDisabledHosts"
+    private let defaultPasswordDestinationKey = "settings.defaultPasswordDestination"
 
     var currentSettingsTab: SettingsTabs = .general
 
@@ -267,6 +270,35 @@ class SocketSettingsService {
         }
     }
 
+    /// When true, newly saved Socket passwords are stored with
+    /// `kSecAttrSynchronizable` so they appear in iCloud Keychain and on other
+    /// signed-in Apple devices. Existing records keep their current sync state.
+    var syncPasswordsToICloud: Bool {
+        didSet {
+            userDefaults.set(syncPasswordsToICloud, forKey: syncPasswordsToICloudKey)
+        }
+    }
+
+    /// Per-profile list of hosts where the user answered "Never for this site".
+    /// Key: profile UUID string. Value: list of hostnames.
+    var passwordSaveDisabledHosts: [String: [String]] {
+        didSet {
+            if let data = try? JSONEncoder().encode(passwordSaveDisabledHosts) {
+                userDefaults.set(data, forKey: passwordSaveDisabledHostsKey)
+            }
+        }
+    }
+
+    /// Where Socket saves new passwords by default. Raw value matches
+    /// `PasswordProviderID` cases: "keychain" or "1password". If the user's
+    /// chosen destination isn't available (e.g. 1Password CLI uninstalled),
+    /// the save dialog falls back to Keychain.
+    var defaultPasswordDestination: String {
+        didSet {
+            userDefaults.set(defaultPasswordDestination, forKey: defaultPasswordDestinationKey)
+        }
+    }
+
     init() {
         // Register default values
         userDefaults.register(defaults: [
@@ -299,6 +331,8 @@ class SocketSettingsService {
             pinnedTabsLookKey: "large",
             didFinishOnboardingKey: false,
             tabLayoutKey: TabLayout.sidebar.rawValue,
+            syncPasswordsToICloudKey: true,
+            defaultPasswordDestinationKey: "keychain",
         ])
 
         // Initialize properties from UserDefaults
@@ -350,6 +384,17 @@ class SocketSettingsService {
         } else {
             self.siteSearchEntries = SiteSearchEntry.defaultSites
         }
+
+        self.syncPasswordsToICloud = userDefaults.object(forKey: syncPasswordsToICloudKey) as? Bool ?? true
+
+        if let data = userDefaults.data(forKey: passwordSaveDisabledHostsKey),
+           let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            self.passwordSaveDisabledHosts = decoded
+        } else {
+            self.passwordSaveDisabledHosts = [:]
+        }
+
+        self.defaultPasswordDestination = userDefaults.string(forKey: defaultPasswordDestinationKey) ?? "keychain"
     }
 }
 

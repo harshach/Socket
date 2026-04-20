@@ -203,8 +203,8 @@ private struct WindowAccessor: NSViewRepresentable {
         currentSpaceLabel: "Preview Space",
         currentSpaceProfileName: "Default",
         availableDestinations: [
-            MiniWindowSpaceDestination(id: UUID(), name: "Work", profileName: "Work", isCurrent: false),
-            MiniWindowSpaceDestination(id: UUID(), name: "Research", profileName: "Default", isCurrent: false)
+            MiniWindowSpaceDestination(id: UUID(), name: "Work", profileId: nil, profileName: "Work", isCurrent: false),
+            MiniWindowSpaceDestination(id: UUID(), name: "Research", profileId: nil, profileName: "Default", isCurrent: false)
         ],
         alwaysUseExternalView: true,
         adoptCurrentSpaceHandler: { _ in },

@@ -15,24 +15,47 @@ class DialogManager {
     var isVisible: Bool = false
     var activeDialog: AnyView?
 
+    /// Invoked when the user presses Return while this dialog is visible.
+    /// Set by dialog constructors that expose a primary button; consumed by
+    /// `KeyboardShortcutManager` so Enter wins over WKWebView's first
+    /// responder (which would otherwise submit a focused web form).
+    var primaryAction: (() -> Void)?
+    /// Invoked when the user presses Escape while this dialog is visible.
+    /// Falls back to `closeDialog()` if unset.
+    var cancelAction: (() -> Void)?
+
     // MARK: - Presentation
 
-    func showDialog<Content: View>(_ dialog: Content) {
+    func showDialog<Content: View>(
+        _ dialog: Content,
+        primaryAction: (() -> Void)? = nil,
+        cancelAction: (() -> Void)? = nil
+    ) {
         activeDialog = AnyView(dialog)
         isVisible = true
+        self.primaryAction = primaryAction
+        self.cancelAction = cancelAction
     }
 
-    func showDialog<Content: View>(@ViewBuilder builder: () -> Content) {
-        showDialog(builder())
+    func showDialog<Content: View>(
+        primaryAction: (() -> Void)? = nil,
+        cancelAction: (() -> Void)? = nil,
+        @ViewBuilder builder: () -> Content
+    ) {
+        showDialog(builder(), primaryAction: primaryAction, cancelAction: cancelAction)
     }
 
     func closeDialog() {
         guard isVisible else {
             activeDialog = nil
+            primaryAction = nil
+            cancelAction = nil
             return
         }
 
         isVisible = false
+        primaryAction = nil
+        cancelAction = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.activeDialog = nil
         }
@@ -44,7 +67,7 @@ class DialogManager {
         onAlwaysQuit: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
-        showDialog {
+        showDialog(primaryAction: onQuit, cancelAction: { [weak self] in self?.closeDialog() }) {
             StandardDialog(
                 header: {
                     EmptyView()

@@ -107,6 +107,10 @@ iOSInjectionProject/
 # IDE
 .vscode/
 
+# Python bytecode from .github/scripts tests
+__pycache__/
+*.pyc
+
 # Xcode build junk
 DerivedData/
 *.xcresult

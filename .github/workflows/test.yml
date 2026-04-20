@@ -1,0 +1,109 @@
+name: Tests
+
+# Runs Swift XCTest + Python unittests on every push / PR. The test target
+# is declared inside `Socket.xcodeproj` (set up by `scripts/add-test-target.rb`)
+# so `xcodebuild test -scheme Socket` picks it up automatically.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-tests:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-spm-${{ hashFiles('Socket.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Run Swift unit tests (SocketTests)
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Socket.xcodeproj \
+            -scheme Socket \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build/test \
+            -only-testing:SocketTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+          | xcbeautify --renderer github-actions || {
+              echo "::error::Swift unit tests failed"
+              exit 1
+            }
+
+      - name: Upload xcresult on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult
+          path: build/test/Logs/Test/*.xcresult
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Python tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
+
+  # UI tests are slow + need a UI session; run on dispatch / nightly only so
+  # PRs aren't blocked by occasional XCUITest flakes. Promote to push/pull_request
+  # once we accumulate enough stable coverage to justify the wall time.
+  ui-tests:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Run XCUITest (SocketUITests)
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Socket.xcodeproj \
+            -scheme Socket \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build/uitest \
+            -only-testing:SocketUITests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+          | xcbeautify --renderer github-actions || {
+              echo "::error::XCUITest failed"
+              exit 1
+            }

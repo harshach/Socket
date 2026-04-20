@@ -35,9 +35,9 @@
             parallelizable = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "2C8925302E88DFF9002236DC"
-               BuildableName = "SocketUITests.xctest"
-               BlueprintName = "SocketUITests"
+               BlueprintIdentifier = "B3BD1A45CA058F45A35EEA44"
+               BuildableName = "SocketTests.xctest"
+               BlueprintName = "SocketTests"
                ReferencedContainer = "container:Socket.xcodeproj">
             </BuildableReference>
          </TestableReference>

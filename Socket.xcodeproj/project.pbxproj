@@ -25,7 +25,26 @@
 		7FE9E0EB2EE59D3500584E16 /* ColorfulX in Frameworks */ = {isa = PBXBuildFile; productRef = 7FE9E0EA2EE59D3500584E16 /* ColorfulX */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		87B4115B3D98B6AF5CC095A8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7F8340F42E37F39400674A5D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7F8340FB2E37F39400674A5D;
+			remoteInfo = Socket;
+		};
+		9DAC4F4895BE4535BEA1DA88 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7F8340F42E37F39400674A5D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7F8340FB2E37F39400674A5D;
+			remoteInfo = Socket;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		26251AE6A31A9122C0620DFC /* SocketUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SocketUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2EF54E0F40C4E5A08C8461D7 /* SocketTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SocketTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7F8340FC2E37F39400674A5D /* Socket.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Socket.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -77,6 +96,8 @@
 		};
 		2D0834B32EC8C43B00C302AC /* App */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = App;
 			sourceTree = "<group>";
 		};
@@ -90,6 +111,8 @@
 		};
 		2D0834C72EC8D90400C302AC /* Settings */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = Settings;
 			sourceTree = "<group>";
 		};
@@ -103,17 +126,42 @@
 		};
 		564997D02E9B125200D89F78 /* UI */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = UI;
 			sourceTree = "<group>";
 		};
 		7F6409912F4729B600A02697 /* Onboarding */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = Onboarding;
+			sourceTree = "<group>";
+		};
+		832DE939A02361F0A2759EC3 /* SocketUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = SocketUITests;
+			sourceTree = "<group>";
+		};
+		880D6CC297EDA5ED31A1E0C3 /* SocketTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = SocketTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		7A3155E297FC7D9BAE462017 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		7F8340F92E37F39400674A5D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -137,34 +185,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXFrameworksBuildPhase section */
-
-/* Begin PBXShellScriptBuildPhase section */
-		7FAABB01000000010000BEEF /* Build shields_compiler */ = {
-			isa = PBXShellScriptBuildPhase;
+		9F60B198162E6CE6338E5FCE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-				"$(SRCROOT)/Support/ShieldsCompiler/Cargo.toml",
-				"$(SRCROOT)/Support/ShieldsCompiler/Cargo.lock",
-				"$(SRCROOT)/Support/ShieldsCompiler/src/lib.rs",
-				"$(SRCROOT)/Support/ShieldsCompiler/src/main.rs",
-				"$(SRCROOT)/Support/ShieldsCompiler/build-xcode.sh",
-			);
-			name = "Build shields_compiler";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-				"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release/libshields_compiler.a",
-			);
 			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/bash;
-			shellScript = "set -euo pipefail\n\"$SRCROOT/Support/ShieldsCompiler/build-xcode.sh\"\n";
 		};
-/* End PBXShellScriptBuildPhase section */
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		7F8340F32E37F39400674A5D = {
@@ -178,6 +206,8 @@
 				564997D02E9B125200D89F78 /* UI */,
 				2CAC4D282E82457B00870189 /* Socket */,
 				2D0834B32EC8C43B00C302AC /* App */,
+				880D6CC297EDA5ED31A1E0C3 /* SocketTests */,
+				832DE939A02361F0A2759EC3 /* SocketUITests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -185,6 +215,8 @@
 			isa = PBXGroup;
 			children = (
 				7F8340FC2E37F39400674A5D /* Socket.app */,
+				2EF54E0F40C4E5A08C8461D7 /* SocketTests.xctest */,
+				26251AE6A31A9122C0620DFC /* SocketUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -192,6 +224,27 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		4D24D2DFD8F8CA51E2F5518C /* SocketUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7D82318D582515DB9D8138C0 /* Build configuration list for PBXNativeTarget "SocketUITests" */;
+			buildPhases = (
+				C1881510BCE483391AF0E813 /* Sources */,
+				7A3155E297FC7D9BAE462017 /* Frameworks */,
+				CF43B5E7855A79081E0AD9B1 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5BE3A5ADB11B3977BE2901FC /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				832DE939A02361F0A2759EC3 /* SocketUITests */,
+			);
+			name = SocketUITests;
+			productName = SocketUITests;
+			productReference = 26251AE6A31A9122C0620DFC /* SocketUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		7F8340FB2E37F39400674A5D /* Socket */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 7F8341082E37F39500674A5D /* Build configuration list for PBXNativeTarget "Socket" */;
@@ -233,6 +286,27 @@
 			productName = Pulse;
 			productReference = 7F8340FC2E37F39400674A5D /* Socket.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B3BD1A45CA058F45A35EEA44 /* SocketTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DE5ACC3CEC113FCC76169CBD /* Build configuration list for PBXNativeTarget "SocketTests" */;
+			buildPhases = (
+				F6D425F9E28214BC9FA1C248 /* Sources */,
+				9F60B198162E6CE6338E5FCE /* Frameworks */,
+				D98C82DF197605DB4D8E09B3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DDA15CCA24B91640CD8B4D18 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				880D6CC297EDA5ED31A1E0C3 /* SocketTests */,
+			);
+			name = SocketTests;
+			productName = SocketTests;
+			productReference = 2EF54E0F40C4E5A08C8461D7 /* SocketTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -278,6 +352,8 @@
 			projectRoot = "";
 			targets = (
 				7F8340FB2E37F39400674A5D /* Socket */,
+				B3BD1A45CA058F45A35EEA44 /* SocketTests */,
+				4D24D2DFD8F8CA51E2F5518C /* SocketUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -290,7 +366,48 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CF43B5E7855A79081E0AD9B1 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D98C82DF197605DB4D8E09B3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		7FAABB01000000010000BEEF /* Build shields_compiler */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Support/ShieldsCompiler/Cargo.toml",
+				"$(SRCROOT)/Support/ShieldsCompiler/Cargo.lock",
+				"$(SRCROOT)/Support/ShieldsCompiler/src/lib.rs",
+				"$(SRCROOT)/Support/ShieldsCompiler/src/main.rs",
+				"$(SRCROOT)/Support/ShieldsCompiler/build-xcode.sh",
+			);
+			name = "Build shields_compiler";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release/libshields_compiler.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\n\"$SRCROOT/Support/ShieldsCompiler/build-xcode.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		7F8340F82E37F39400674A5D /* Sources */ = {
@@ -300,7 +417,36 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1881510BCE483391AF0E813 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F6D425F9E28214BC9FA1C248 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5BE3A5ADB11B3977BE2901FC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = Socket;
+			target = 7F8340FB2E37F39400674A5D /* Socket */;
+			targetProxy = 87B4115B3D98B6AF5CC095A8 /* PBXContainerItemProxy */;
+		};
+		DDA15CCA24B91640CD8B4D18 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = Socket;
+			target = 7F8340FB2E37F39400674A5D /* Socket */;
+			targetProxy = 9DAC4F4895BE4535BEA1DA88 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		7F8341062E37F39500674A5D /* Debug */ = {
@@ -439,15 +585,10 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
-				);
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
 				INFOPLIST_FILE = Socket/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Socket;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -456,6 +597,10 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
 				);
 				MARKETING_VERSION = 1.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = io.socketbrowser.socket;
@@ -469,6 +614,7 @@
 				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = YES;
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
 				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/Socket/Supporting Files/Socket-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 			};
@@ -490,20 +636,15 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
 				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
-				);
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
 				INFOPLIST_FILE = Socket/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Socket;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -512,6 +653,10 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
 				);
 				MARKETING_VERSION = 1.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = io.socketbrowser.socket;
@@ -525,14 +670,126 @@
 				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
 				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/Socket/Supporting Files/Socket-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};
+		81211D21DAA5A2AD8134427E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				PRODUCT_BUNDLE_IDENTIFIER = io.socketbrowser.socket.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Socket;
+			};
+			name = Debug;
+		};
+		9C7A15CBDE07F4F1FA3A0608 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				PRODUCT_BUNDLE_IDENTIFIER = io.socketbrowser.socket.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Socket;
+			};
+			name = Release;
+		};
+		C35F03E87728CD34B1E91943 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				PRODUCT_BUNDLE_IDENTIFIER = io.socketbrowser.socket.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Socket.app/Contents/MacOS/Socket";
+			};
+			name = Release;
+		};
+		C70A808830ABB3A0F34EECF2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Support/ShieldsCompiler/target/universal/release",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				PRODUCT_BUNDLE_IDENTIFIER = io.socketbrowser.socket.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Socket/ThirdParty/ShieldsEngine";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Socket.app/Contents/MacOS/Socket";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		7D82318D582515DB9D8138C0 /* Build configuration list for PBXNativeTarget "SocketUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9C7A15CBDE07F4F1FA3A0608 /* Release */,
+				81211D21DAA5A2AD8134427E /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		7F8340F72E37F39400674A5D /* Build configuration list for PBXProject "Socket" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -547,6 +804,15 @@
 			buildConfigurations = (
 				7F8341092E37F39500674A5D /* Debug */,
 				7F83410A2E37F39500674A5D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DE5ACC3CEC113FCC76169CBD /* Build configuration list for PBXNativeTarget "SocketTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C35F03E87728CD34B1E91943 /* Release */,
+				C70A808830ABB3A0F34EECF2 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -8,14 +8,29 @@ This directory is copied to the `gh-pages` branch on first run of the nightly or
 
 Do not edit these files directly on `gh-pages` — both workflows will overwrite missing entries from this seed directory.
 
-## First install
+## First install (macOS 15+)
 
-Socket is ad-hoc signed, not notarized. On first launch macOS Gatekeeper will refuse to open it. Workarounds:
+Recommended — the one-liner installer. Because it runs via `curl | bash`, the script itself is never quarantined, so it can strip `com.apple.quarantine` / `com.apple.provenance` from the DMG before Gatekeeper ever sees `Socket.app`:
 
-1. **Right-click → Open** on `Socket.app`, confirm the prompt. One-time.
-2. Or run in Terminal before launching: `xattr -dr com.apple.quarantine /Applications/Socket.app`
+```sh
+/bin/bash -c "$(curl -fsSL https://harshach.github.io/Socket/install.sh)"
+```
 
-Subsequent launches and auto-updates go through Sparkle's EdDSA-signed appcast and don't need either workaround.
+Nightly channel:
+
+```sh
+SOCKET_CHANNEL=nightly /bin/bash -c "$(curl -fsSL https://harshach.github.io/Socket/install.sh)"
+```
+
+**Manual install fallback** — if someone downloads the DMG from the Releases page directly:
+
+```sh
+sudo xattr -cr /Applications/Socket.app
+```
+
+Then right-click → Open. (`-cr` clears every extended attribute. The narrower `xattr -dr com.apple.quarantine` doesn't work on macOS 15 because Gatekeeper also inspects `com.apple.provenance`.)
+
+Subsequent auto-updates go through Sparkle's EdDSA-signed appcast and don't trip Gatekeeper again.
 
 ## Why not notarized?
 

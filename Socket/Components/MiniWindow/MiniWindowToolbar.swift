@@ -50,10 +50,19 @@ struct MiniWindowToolbar: View {
     }
 
     var body: some View {
+        // SigmaOS-style layout:
+        //   Left  — destination picker (split-button Menu: click = Open, chevron = pick)
+        //   Center — dimmed page title, flex-grows and truncates
+        //   Right — single ✓ close
+        // Puts the primary action (where does this page go?) up front and
+        // relegates the page title to contextual info, which matches what
+        // the user is actually deciding when they see a mini window.
         HStack(spacing: 10) {
-            titleGroup
+            destinationButton
             Spacer(minLength: 12)
-            actionGroup
+            titleCenter
+            Spacer(minLength: 12)
+            closeButton
         }
         .padding(.horizontal, TopBarMetrics.horizontalPadding)
         .padding(.vertical, TopBarMetrics.verticalPadding)
@@ -67,41 +76,34 @@ struct MiniWindowToolbar: View {
         }
     }
 
-    private var titleGroup: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.up.forward.app")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(linkAccentColor)
-
-            Text(displayTitle)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(foregroundColor)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Text("· \(session.currentSpaceLabel)")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(secondaryForegroundColor)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: 420, alignment: .leading)
-    }
-
-    private var actionGroup: some View {
-        HStack(spacing: 6) {
+    /// Split-button destination picker: left press = Open in the selected
+    /// destination; right chevron = pick a different destination from the menu.
+    /// We compose two distinct controls sharing a single visual capsule
+    /// because SwiftUI's `Menu(primaryAction:)` on macOS consumes the whole
+    /// label hit-target, leaving the chevron unreachable.
+    private var destinationButton: some View {
+        HStack(spacing: 0) {
             Button(action: adoptAction) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.forward.and.arrow.up.backward")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Open in \(session.selectedDestinationLabel)")
                         .font(.system(size: 12, weight: .semibold))
-                    Text("Open")
-                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(RectNavButtonStyle())
-            .controlSize(.small)
+            .buttonStyle(.plain)
             .foregroundStyle(foregroundColor)
             .help("Open in \(session.selectedDestinationMenuTitle)")
             .keyboardShortcut("o", modifiers: [])
+
+            Rectangle()
+                .fill(secondaryForegroundColor.opacity(0.35))
+                .frame(width: 1, height: 14)
 
             Menu {
                 Button(action: session.selectCurrentSpace) {
@@ -132,30 +134,53 @@ struct MiniWindowToolbar: View {
                     )
                 }
             } label: {
-                HStack(spacing: 6) {
-                    Text(session.selectedDestinationLabel)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
             }
-            .menuStyle(.button)
-            .buttonStyle(RectNavButtonStyle())
-            .controlSize(.small)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
             .foregroundStyle(foregroundColor)
-            .help("Choose where Open sends this page")
-
-            Button(action: dismissAction) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .buttonStyle(NavButtonStyle(size: .small))
-            .foregroundStyle(foregroundColor)
-            .help("Close external view")
-            .keyboardShortcut("d", modifiers: [])
+            .help("Change destination")
         }
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(secondaryForegroundColor.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(secondaryForegroundColor.opacity(0.18), lineWidth: 1)
+        )
+        .fixedSize()
+    }
+
+    /// Dimmed, center-aligned page title. Flex-grows and truncates.
+    private var titleCenter: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.up.forward.app")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(linkAccentColor)
+            Text(displayTitle)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(secondaryForegroundColor)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var closeButton: some View {
+        Button(action: dismissAction) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .buttonStyle(NavButtonStyle(size: .small))
+        .foregroundStyle(foregroundColor)
+        .help("Close external view")
+        .keyboardShortcut("d", modifiers: [])
     }
 
     private var displayTitle: String {

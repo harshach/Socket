@@ -208,6 +208,11 @@ class WebViewCoordinator {
         newWebView.configuration.userContentController.add(tab, name: "historyStateDidChange")
         newWebView.configuration.userContentController.add(tab, name: "SocketIdentity")
         newWebView.configuration.userContentController.add(tab, name: "socketShortcutDetect")
+        newWebView.configuration.userContentController.add(tab, name: "passwordFormDetected")
+        newWebView.configuration.userContentController.add(tab, name: "passwordFormSubmitted")
+        newWebView.configuration.userContentController.addScriptMessageHandler(
+            tab, contentWorld: .page, name: "passwordAutofillRequest"
+        )
         newWebView.configuration.userContentController.addUserScript(
             WKUserScript(
                 source: WebsiteShortcutDetector.jsDetectionScript,
@@ -374,6 +379,11 @@ class WebViewCoordinator {
         newWebView.configuration.userContentController.add(tab, name: "backgroundColor_\(tabId.uuidString)")
         newWebView.configuration.userContentController.add(tab, name: "historyStateDidChange")
         newWebView.configuration.userContentController.add(tab, name: "SocketIdentity")
+        newWebView.configuration.userContentController.add(tab, name: "passwordFormDetected")
+        newWebView.configuration.userContentController.add(tab, name: "passwordFormSubmitted")
+        newWebView.configuration.userContentController.addScriptMessageHandler(
+            tab, contentWorld: .page, name: "passwordAutofillRequest"
+        )
         tab.browserManager?.trackingProtectionManager.configureNewWebView(
             newWebView,
             for: tab
@@ -420,6 +430,9 @@ class WebViewCoordinator {
             "historyStateDidChange",
             "SocketIdentity",
             "socketShortcutDetect",
+            "passwordFormDetected",
+            "passwordFormSubmitted",
+            "passwordAutofillRequest",
         ]
 
         for handlerName in allMessageHandlers {

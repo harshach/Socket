@@ -394,6 +394,7 @@ class BrowserManager: ObservableObject {
     var dialogManager: DialogManager
     var downloadManager: DownloadManager
     var authenticationManager: AuthenticationManager
+    var passwordManager: PasswordManager
     var historyManager: HistoryManager
     var cookieManager: CookieManager
     var cacheManager: CacheManager
@@ -530,6 +531,7 @@ class BrowserManager: ObservableObject {
         self.dialogManager = DialogManager()
         self.downloadManager = DownloadManager.shared
         self.authenticationManager = AuthenticationManager()
+        self.passwordManager = PasswordManager()
         // Initialize managers with current profile context for isolation
         self.historyManager = HistoryManager(context: modelContext, profileId: initialProfile?.id)
         self.cookieManager = CookieManager(dataStore: initialProfile?.dataStore)
@@ -579,6 +581,7 @@ class BrowserManager: ObservableObject {
         self.peekManager.attach(browserManager: self)
         bindPeekManagerUpdates()
         self.authenticationManager.attach(browserManager: self)
+        self.passwordManager.attach(browserManager: self)
         // Migrate legacy history entries (with nil profile) to default profile to avoid cross-profile leakage
         self.migrateUnassignedDataToDefaultProfile()
         loadSidebarSettings()
@@ -2786,6 +2789,11 @@ class BrowserManager: ObservableObject {
 
     func showPrivacySettings() {
         socketSettings?.currentSettingsTab = .privacy
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+
+    func showPasswordsSettings() {
+        socketSettings?.currentSettingsTab = .passwords
         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 

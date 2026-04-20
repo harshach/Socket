@@ -1018,7 +1018,10 @@ final class ExtensionManager: NSObject, ObservableObject,
 
     /// Marker that identifies a service worker file we have already patched
     /// so re-patching on app relaunch is idempotent.
-    private static let serviceWorkerPolyfillMarker = "// __SOCKET_SW_POLYFILL_V1__"
+    /// Sentinel inserted at the top of a patched service worker so we can
+    /// detect prior patching and skip re-prepending the polyfill.
+    /// Internal (was private) so XCTest can verify the patch happened.
+    static let serviceWorkerPolyfillMarker = "// __SOCKET_SW_POLYFILL_V1__"
 
     /// Polyfill prepended to MV3 service workers. Installs no-op stubs for
     /// chrome.offscreen and chrome.privacy on the worker's globalThis so
@@ -1070,7 +1073,9 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// Marker that identifies a service worker we have downgraded from
     /// `type: "module"` to a classic script. Written as a comment inside
     /// the SW so we can detect prior conversion when re-patching.
-    private static let serviceWorkerModuleStripMarker = "// __SOCKET_SW_MODULE_STRIPPED_V1__"
+    /// Sentinel for the second-pass classic-script downgrade. Internal so
+    /// tests can assert the marker is present after a module SW gets rewritten.
+    static let serviceWorkerModuleStripMarker = "// __SOCKET_SW_MODULE_STRIPPED_V1__"
 
     /// Marker that identifies a service worker where we already rewrote
     /// top-level ESM syntax into classic-script-compatible code.
@@ -1241,7 +1246,13 @@ final class ExtensionManager: NSObject, ObservableObject,
     ///      bundles like 1Password where `import ...` / `export {...}`
     ///      live on a single line and were previously missed by the
     ///      line-based downgrade pass.
-    private func patchServiceWorkerForCompat(packageDir: URL, manifestURL: URL) {
+    /// Patch a freshly-extracted MV3 extension's service worker so it loads
+    /// under WKWebExtension. Two passes — both idempotent — are applied in
+    /// place: prepend the chrome.offscreen / chrome.privacy polyfill, and
+    /// downgrade `type: "module"` SWs to classic scripts (WKWebExtension
+    /// silently drops module SWs). Internal so XCTest can call it directly
+    /// against fixture extension dirs.
+    func patchServiceWorkerForCompat(packageDir: URL, manifestURL: URL) {
         guard let data = try? Data(contentsOf: manifestURL),
               var manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
@@ -1304,8 +1315,11 @@ final class ExtensionManager: NSObject, ObservableObject,
         }
     }
 
-    /// Validate MV3-specific requirements
-    private func validateMV3Requirements(manifest: [String: Any], baseURL: URL)
+    /// Validate MV3-specific requirements (service-worker file exists,
+    /// content scripts well-formed). Throws `ExtensionError.installationFailed`
+    /// when the package is unsafe to hand to WKWebExtension. Internal so
+    /// XCTest can exercise the rejection paths against fixture dirs.
+    func validateMV3Requirements(manifest: [String: Any], baseURL: URL)
         throws
     {
         // Check for service worker
@@ -1352,7 +1366,11 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// The fix: content scripts that target a small set of specific domains (not
     /// wildcard all-sites patterns) and don't already specify a world are patched
     /// to run in MAIN world, where fetch() uses the page's origin and cookies.
-    private func patchManifestForWebKit(at manifestURL: URL) {
+    /// Apply WebKit-compat manifest fixups: revert MAIN-world content scripts
+    /// for domain-specific matches, inject the externally_connectable bridge
+    /// (`socket_bridge.js`) when needed, and write the bridge JS to disk.
+    /// Internal so XCTest can drive it against fixture manifests.
+    func patchManifestForWebKit(at manifestURL: URL) {
         guard let data = try? Data(contentsOf: manifestURL),
               var manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }

@@ -15,7 +15,12 @@ struct MiniWindowWebView: NSViewRepresentable {
         Coordinator(session: session)
     }
 
-    func makeNSView(context: Context) -> WKWebView {
+    /// We return a container NSView and place the WKWebView inside it with
+    /// autoresizing, instead of returning the WKWebView directly. SwiftUI's
+    /// NSViewRepresentable layout doesn't reliably resize WKWebView from
+    /// `frame: .zero`, which left the page rendering blank — observable as
+    /// big white voids on heavy pages like a GitHub PR view.
+    func makeNSView(context: Context) -> NSView {
         let configuration: WKWebViewConfiguration
         if let profile = session.profile {
             configuration = BrowserConfiguration.shared.webViewConfiguration(for: profile)
@@ -23,23 +28,44 @@ struct MiniWindowWebView: NSViewRepresentable {
             configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration()
         }
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let container = NSView(frame: .zero)
+        container.autoresizesSubviews = true
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let webView = WKWebView(frame: container.bounds, configuration: configuration)
+        webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
+        container.addSubview(webView)
 
+        context.coordinator.webView = webView
+        context.coordinator.webViewProfileId = session.profile?.id
         context.coordinator.installProgressObservation(on: webView)
         context.coordinator.installThemeColorExtraction(on: webView)
         context.coordinator.installAuthDetectionScript(on: webView)
+        // Mini window participates in the same shortcut-suppression contract
+        // as regular tabs: when a web text field is focused, app shortcuts
+        // (j/k/cmd-w-overrides, etc.) must not fire on those keystrokes.
+        context.coordinator.installShortcutDetection(on: webView)
         context.coordinator.loadInitialURLIfNeeded(on: webView)
 
-        return webView
+        return container
     }
 
-    func updateNSView(_ nsView: WKWebView, context: Context) {
+    func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.session = session
-        context.coordinator.loadInitialURLIfNeeded(on: nsView)
+        // Profile swap (user picked a different destination in the toolbar
+        // dropdown): tear down the old WebView and create a new one under
+        // the new profile's WKWebsiteDataStore, then reload the current URL.
+        if context.coordinator.webViewProfileId != session.profile?.id {
+            context.coordinator.recreateWebView(in: nsView, session: session)
+            return
+        }
+        if let webView = context.coordinator.webView {
+            context.coordinator.loadInitialURLIfNeeded(on: webView)
+        }
     }
 
     // MARK: - Coordinator
@@ -51,6 +77,15 @@ struct MiniWindowWebView: NSViewRepresentable {
 
         /// Weak reference to the webView so we can clean up message handlers in deinit
         private weak var installedWebView: WKWebView?
+
+        /// Reference to the webView held by the container, so updateNSView can
+        /// drive navigation without the SwiftUI representable owning it directly.
+        weak var webView: WKWebView?
+
+        /// Profile id the current `webView` was built against. When this
+        /// disagrees with `session.profile?.id`, updateNSView recreates the
+        /// WebView so the new profile's data store takes effect.
+        var webViewProfileId: UUID?
 
         init(session: MiniWindowSession) {
             self.session = session
@@ -89,6 +124,13 @@ struct MiniWindowWebView: NSViewRepresentable {
             Task { @MainActor in
                 webView?.configuration.userContentController
                     .removeScriptMessageHandler(forName: "authCompletion")
+                webView?.configuration.userContentController
+                    .removeScriptMessageHandler(forName: "socketShortcutDetect")
+                // Reset shortcut-detector editable-focus to avoid leaving the
+                // shortcut manager stuck thinking a text field is still focused
+                // after the mini window closes.
+                self.session.browserManager?.keyboardShortcutManager?
+                    .websiteShortcutDetector.updateEditableFocus(false)
             }
         }
 
@@ -229,6 +271,64 @@ struct MiniWindowWebView: NSViewRepresentable {
             webView.configuration.userContentController.addUserScript(script)
         }
 
+        func installShortcutDetection(on webView: WKWebView) {
+            webView.configuration.userContentController.add(self, name: "socketShortcutDetect")
+            webView.configuration.userContentController.addUserScript(
+                WKUserScript(
+                    source: WebsiteShortcutDetector.jsDetectionScript,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: true
+                )
+            )
+        }
+
+        /// Rebuilds the WKWebView under the session's current profile and
+        /// reloads the current URL. Called when the user switches destinations
+        /// via the toolbar dropdown. The old WebView's delegates and message
+        /// handlers are detached so nothing keeps it alive.
+        func recreateWebView(in container: NSView, session: MiniWindowSession) {
+            let currentURL = webView?.url ?? session.currentURL
+
+            if let old = webView {
+                old.navigationDelegate = nil
+                old.uiDelegate = nil
+                let ucc = old.configuration.userContentController
+                ucc.removeScriptMessageHandler(forName: "authCompletion")
+                ucc.removeScriptMessageHandler(forName: "socketShortcutDetect")
+                old.removeFromSuperview()
+            }
+            progressObservation?.invalidate()
+            progressObservation = nil
+            didLoadInitialURL = false
+
+            let configuration: WKWebViewConfiguration
+            if let profile = session.profile {
+                configuration = BrowserConfiguration.shared.webViewConfiguration(for: profile)
+            } else {
+                configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration()
+            }
+
+            let newWebView = WKWebView(frame: container.bounds, configuration: configuration)
+            newWebView.autoresizingMask = [.width, .height]
+            newWebView.navigationDelegate = self
+            newWebView.uiDelegate = self
+            newWebView.allowsBackForwardNavigationGestures = true
+            newWebView.allowsMagnification = true
+            container.addSubview(newWebView)
+
+            webView = newWebView
+            webViewProfileId = session.profile?.id
+            installProgressObservation(on: newWebView)
+            installThemeColorExtraction(on: newWebView)
+            installAuthDetectionScript(on: newWebView)
+            installShortcutDetection(on: newWebView)
+
+            // Fresh load under the new profile's data store.
+            session.updateLoading(isLoading: true)
+            newWebView.load(URLRequest(url: currentURL))
+            didLoadInitialURL = true
+        }
+
         func loadInitialURLIfNeeded(on webView: WKWebView) {
             guard didLoadInitialURL == false else { return }
             didLoadInitialURL = true
@@ -296,22 +396,35 @@ struct MiniWindowWebView: NSViewRepresentable {
         
         // MARK: - WKScriptMessageHandler
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == "authCompletion",
-                  let body = message.body as? [String: Any] else { return }
-            
-            let success = body["success"] as? Bool ?? false
-            let shouldClose = body["shouldClose"] as? Bool ?? false
-            let urlString = body["url"] as? String
-            
-            print("🔐 [MiniWindow] JavaScript auth completion detected: success=\(success), shouldClose=\(shouldClose), url=\(urlString ?? "nil")")
-            
-            let finalURL = urlString.flatMap { URL(string: $0) }
-            session.completeAuth(success: success, finalURL: finalURL)
-            
-            // If the site expects the window to close, we could close it automatically
-            // but for now, let's let the user decide when to close/adopt the window
-            if shouldClose {
-                print("🔐 [MiniWindow] Site requested window close, but keeping window open for user control")
+            switch message.name {
+            case "authCompletion":
+                guard let body = message.body as? [String: Any] else { return }
+                let success = body["success"] as? Bool ?? false
+                let shouldClose = body["shouldClose"] as? Bool ?? false
+                let urlString = body["url"] as? String
+                print("🔐 [MiniWindow] JavaScript auth completion detected: success=\(success), shouldClose=\(shouldClose), url=\(urlString ?? "nil")")
+                let finalURL = urlString.flatMap { URL(string: $0) }
+                session.completeAuth(success: success, finalURL: finalURL)
+                if shouldClose {
+                    print("🔐 [MiniWindow] Site requested window close, but keeping window open for user control")
+                }
+
+            case "socketShortcutDetect":
+                // Forward editable-focus state to the shared shortcut detector.
+                // This is what gates app keyboard shortcuts (j/k, etc.) from
+                // firing while the user is typing into the mini window.
+                let isEditableFocused: Bool = {
+                    if let payload = message.body as? [String: Any] {
+                        return payload["isEditableElementFocused"] as? Bool ?? false
+                    }
+                    return false
+                }()
+                session.browserManager?.keyboardShortcutManager?
+                    .websiteShortcutDetector
+                    .updateEditableFocus(isEditableFocused)
+
+            default:
+                break
             }
         }
     }

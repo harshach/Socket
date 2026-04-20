@@ -21,7 +21,31 @@ xcodebuild -scheme Socket -configuration Release -arch arm64 -arch x86_64 -deriv
 
 You must set your personal Development Team in Xcode Signing settings to build locally.
 
-**Test target**: `SocketUITests` (UI tests only, run via Xcode or `xcodebuild test -scheme Socket`).
+**Test targets**:
+
+- **`SocketTests`** — XCTest unit tests. Run with:
+  ```bash
+  xcodebuild test -scheme Socket -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath build/test CODE_SIGNING_ALLOWED=NO
+  ```
+  Tests live in `SocketTests/` and are auto-discovered via a
+  `PBXFileSystemSynchronizedRootGroup` — just drop `*.swift` files there.
+  The target is declared in `Socket.xcodeproj` by `scripts/add-test-target.rb`
+  (idempotent; re-run after a `git clean` that nukes the pbxproj).
+
+- **`SocketUITests`** — XCUITest scaffold (slow, runs out-of-process). Run with:
+  ```bash
+  xcodebuild test -scheme Socket -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath build/test -only-testing:SocketUITests CODE_SIGNING_ALLOWED=NO
+  ```
+  Tests live in `SocketUITests/` (auto-discovered via the same sync-group pattern).
+  Not part of the default scheme `Testables` — opt in via `-only-testing` so
+  unit-test runs stay snappy. CI runs them only on `workflow_dispatch` / nightly.
+
+- **Python unittests** for `.github/scripts/*` live alongside the scripts
+  as `test_*.py`. Run: `python3 -m unittest discover -s .github/scripts -p "test_*.py"`
+
+Swift unit + Python suites run on every push and PR via `.github/workflows/test.yml`.
 
 **No SPM**: All dependencies are embedded locally in `Socket/ThirdParty/` — no `swift package resolve` needed.
 

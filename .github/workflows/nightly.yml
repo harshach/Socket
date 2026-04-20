@@ -165,7 +165,7 @@ jobs:
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
-          for f in appcast.xml appcast-nightly.xml index.html README.md; do
+          for f in appcast.xml appcast-nightly.xml index.html README.md install.sh; do
             if [ ! -f "$f" ]; then
               cp "/tmp/appcast-staging/seed/$f" "$f"
               echo "Seeded $f"
@@ -183,7 +183,7 @@ jobs:
           APPCAST_MAX_ITEMS=30 \
             python3 /tmp/appcast-staging/update-appcast.py
 
-          git add appcast.xml appcast-nightly.xml index.html README.md
+          git add appcast.xml appcast-nightly.xml index.html README.md install.sh
           if git diff --cached --quiet; then
             echo "No appcast changes to commit."
           else

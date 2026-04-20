@@ -66,6 +66,19 @@ class BrowserConfiguration {
         // Note: WebAuthn/Passkey support is enabled by default in WKWebView on macOS 13.3+
         // and requires only: entitlements, WKUIDelegate methods, and Info.plist descriptions
 
+        // Password form detection user script. Injected at document_end in every
+        // frame. `freshUserContentController()` copies it onto each tab's UCC so
+        // primaries and clones both get it. Message handlers (passwordFormDetected,
+        // passwordFormSubmitted) are registered per-webview in WebViewCoordinator.
+        if let url = Bundle.main.url(forResource: "PasswordFormDetector", withExtension: "js"),
+           let src = try? String(contentsOf: url, encoding: .utf8) {
+            config.userContentController.addUserScript(
+                WKUserScript(source: src,
+                             injectionTime: .atDocumentEnd,
+                             forMainFrameOnly: false)
+            )
+        }
+
         return config
     }()
 

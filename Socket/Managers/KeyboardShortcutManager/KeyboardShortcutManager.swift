@@ -253,20 +253,40 @@ class KeyboardShortcutManager {
     }
 
     private func shouldHandleModifierlessShortcut(_ keyCombination: KeyCombination) -> Bool {
+        let context = ShortcutDispatchContext(
+            sigmaCommandModeEnabled: sigmaCommandModeEnabled,
+            isDialogVisible: browserManager?.dialogManager.isVisible == true,
+            hasNativeTextInputFocus: isNativeTextInputFocused(),
+            hasExtensionUIFocus: isExtensionUIFocused(),
+            isInsertModeEnabled: windowRegistry?.activeWindow?.isInsertModeEnabled == true,
+            isEditableElementFocusedInWeb: websiteShortcutDetector.isEditableElementFocused
+        )
+        return Self.shouldHandleModifierlessShortcut(keyCombination, in: context)
+    }
+
+    /// Pure decision function for the modifierless-shortcut gate. Lifted out
+    /// of the instance method so XCTest can exercise every branch without a
+    /// live BrowserManager / WindowRegistry / NSApp.keyWindow. Production
+    /// callers go through the wrapper above which builds the context from
+    /// instance state.
+    static func shouldHandleModifierlessShortcut(
+        _ keyCombination: KeyCombination,
+        in context: ShortcutDispatchContext
+    ) -> Bool {
         let hasExplicitCommandModifiers =
             keyCombination.modifiers.contains(.command) ||
             keyCombination.modifiers.contains(.option) ||
             keyCombination.modifiers.contains(.control)
 
-        // Treat bare and shift-only shortcuts as Sigma-style single-key navigation.
-        // They should never fire while the user is typing in a native or web text field.
+        // Treat bare and shift-only shortcuts as Sigma-style single-key
+        // navigation; they must not fire while the user is typing.
         guard !hasExplicitCommandModifiers else { return true }
-        guard sigmaCommandModeEnabled else { return false }
-        guard browserManager?.dialogManager.isVisible != true else { return false }
-        guard !isNativeTextInputFocused() else { return false }
-        guard !isExtensionUIFocused() else { return false }
-        guard windowRegistry?.activeWindow?.isInsertModeEnabled != true else { return false }
-        guard !websiteShortcutDetector.isEditableElementFocused else { return false }
+        guard context.sigmaCommandModeEnabled else { return false }
+        guard !context.isDialogVisible else { return false }
+        guard !context.hasNativeTextInputFocus else { return false }
+        guard !context.hasExtensionUIFocus else { return false }
+        guard !context.isInsertModeEnabled else { return false }
+        guard !context.isEditableElementFocusedInWeb else { return false }
         return true
     }
 
@@ -278,16 +298,43 @@ class KeyboardShortcutManager {
             print("⌨️ [KSM] Skipping - already forwarding event")
             return false
         }
-        
+
         let keyCode = event.keyCode
-        if keyCode == 36 || keyCode == 76 { // 36 = Return, 76 = Enter (numpad)
-            let hasModifiers = event.modifierFlags.contains(.command) ||
-                              event.modifierFlags.contains(.option) ||
-                              event.modifierFlags.contains(.control) ||
-                              event.modifierFlags.contains(.shift)
-            if !hasModifiers {
-                return false
+        let modifierlessEnter = (keyCode == 36 || keyCode == 76) &&
+            !event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift)
+        let modifierlessEscape = keyCode == 53 &&
+            !event.modifierFlags.contains(.command) &&
+            !event.modifierFlags.contains(.option) &&
+            !event.modifierFlags.contains(.control) &&
+            !event.modifierFlags.contains(.shift)
+
+        // Dialog first: Enter / Escape must trigger the dialog's primary /
+        // cancel action, even when a focused WKWebView input would otherwise
+        // eat those keys. We consume the event so the web view never sees it.
+        // Without this, pressing Enter on the quit confirmation dialog gets
+        // swallowed by the Google search box underneath and submits a query
+        // instead of confirming the dialog.
+        if browserManager?.dialogManager.isVisible == true {
+            if modifierlessEnter {
+                if let action = browserManager?.dialogManager.primaryAction {
+                    action()
+                    return true
+                }
+            } else if modifierlessEscape {
+                if let action = browserManager?.dialogManager.cancelAction {
+                    action()
+                } else {
+                    browserManager?.dialogManager.closeDialog()
+                }
+                return true
             }
+        }
+
+        if modifierlessEnter {
+            return false
         }
 
         // Arrow keys and other navigation keys should pass through to the WebView
@@ -726,4 +773,36 @@ class KeyboardShortcutManager {
 extension Notification.Name {
     static let shortcutExecuted = Notification.Name("shortcutExecuted")
     static let shortcutsChanged = Notification.Name("shortcutsChanged")
+}
+
+// MARK: - Dispatch Context
+
+/// Snapshot of the input-context flags the modifierless-shortcut gate
+/// queries during dispatch. Decoupled from BrowserManager / WindowRegistry /
+/// NSApp so the gate can be unit-tested as a pure function via
+/// `KeyboardShortcutManager.shouldHandleModifierlessShortcut(_:in:)`.
+struct ShortcutDispatchContext {
+    /// User has the "Sigma command mode" preference enabled.
+    let sigmaCommandModeEnabled: Bool
+    /// A modal dialog is on screen (its primary/cancel actions own Enter / Esc).
+    let isDialogVisible: Bool
+    /// `NSApp.keyWindow.firstResponder` is a relevant `NSTextView` field editor.
+    let hasNativeTextInputFocus: Bool
+    /// First responder lives inside an extension popup / options page WKWebView.
+    let hasExtensionUIFocus: Bool
+    /// Active window is in vim-style Insert Mode (entered via `I`).
+    let isInsertModeEnabled: Bool
+    /// JS-detector reported a focused editable element inside a page.
+    let isEditableElementFocusedInWeb: Bool
+
+    /// Baseline where every gate is "open" — start here in tests, then
+    /// mutate the single flag the test cares about.
+    static let allShortcutsAllowed = ShortcutDispatchContext(
+        sigmaCommandModeEnabled: true,
+        isDialogVisible: false,
+        hasNativeTextInputFocus: false,
+        hasExtensionUIFocus: false,
+        isInsertModeEnabled: false,
+        isEditableElementFocusedInWeb: false
+    )
 }

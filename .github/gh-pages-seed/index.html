@@ -1,9 +1,43 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Socket Browser Updates</title>
-<h1>Socket Browser update feeds</h1>
+<title>Socket Browser</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 680px; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; color: #222; }
+  code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 90%; }
+  pre  { background: #0f1113; color: #e6e6e6; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 92%; }
+  h1, h2 { margin-top: 2rem; }
+  .channels { display: flex; gap: 1rem; }
+  .channels > div { flex: 1; }
+  a { color: #0060df; }
+</style>
+
+<h1>Socket Browser</h1>
+<p>A minimal macOS browser. Ad-hoc signed, updated via Sparkle with EdDSA-verified signatures.</p>
+
+<h2>Install</h2>
+<p>One-line install, no Gatekeeper prompts, no manual <code>xattr</code>:</p>
+
+<div class="channels">
+  <div>
+    <h3>Stable</h3>
+    <pre><code>/bin/bash -c "$(curl -fsSL https://harshach.github.io/Socket/install.sh)"</code></pre>
+  </div>
+  <div>
+    <h3>Nightly</h3>
+    <pre><code>SOCKET_CHANNEL=nightly /bin/bash -c "$(curl -fsSL https://harshach.github.io/Socket/install.sh)"</code></pre>
+  </div>
+</div>
+
+<p>The script fetches the latest DMG from <a href="https://github.com/harshach/Socket/releases">GitHub Releases</a>, drops <code>Socket.app</code> into <code>/Applications</code>, clears macOS quarantine attributes, and launches the app. After that, Sparkle auto-updates take over — no re-install needed.</p>
+
+<h2>Manual install (if you'd rather download the DMG)</h2>
+<p>Grab the latest DMG from <a href="https://github.com/harshach/Socket/releases">Releases</a>, drag <code>Socket.app</code> to <code>/Applications</code>, then run:</p>
+<pre><code>sudo xattr -cr /Applications/Socket.app</code></pre>
+<p>Then right-click → Open on <code>Socket.app</code> and confirm the Gatekeeper prompt. The <code>install.sh</code> script above does all of this automatically.</p>
+
+<h2>Update feeds</h2>
 <ul>
   <li><a href="appcast.xml">Stable channel</a></li>
   <li><a href="appcast-nightly.xml">Nightly channel</a></li>
+  <li><a href="install.sh">install.sh</a> (source)</li>
 </ul>
-<p>See <a href="https://github.com/harshach/Socket/releases">GitHub Releases</a> for downloads.</p>

@@ -13,6 +13,10 @@ import Combine
 struct MiniWindowSpaceDestination: Identifiable, Hashable {
     let id: UUID
     let name: String
+    /// Profile attached to the space. When the user picks this destination in
+    /// the toolbar, the mini window's WebView is recreated under this profile
+    /// so the current page is live-reloaded against that profile's cookies.
+    let profileId: UUID?
     let profileName: String?
     let isCurrent: Bool
 
@@ -27,7 +31,13 @@ struct MiniWindowSpaceDestination: Identifiable, Hashable {
 @MainActor
 final class MiniWindowSession: ObservableObject, Identifiable {
     let id = UUID()
-    let profile: Profile?
+    /// Profile the WebView is currently rendering under. `@Published` so
+    /// `MiniWindowWebView` can react to destination changes and recreate the
+    /// WKWebView with the new profile's `WKWebsiteDataStore`.
+    @Published private(set) var profile: Profile?
+    /// Profile at creation time — restored when user picks the "Current space"
+    /// entry after having switched to another destination.
+    private let originalProfile: Profile?
     let originName: String
     let currentSpaceLabel: String
     let currentSpaceProfileName: String?
@@ -47,6 +57,11 @@ final class MiniWindowSession: ObservableObject, Identifiable {
     @Published var alwaysUseExternalView: Bool
     @Published var selectedDestinationId: UUID?
 
+    /// Weak ref so the WebView coordinator can reach KeyboardShortcutManager
+    /// to report when an editable web element is focused — without that, app
+    /// shortcuts fire while the user is typing into the mini window's WKWebView.
+    weak var browserManager: BrowserManager?
+
     init(
         url: URL,
         profile: Profile?,
@@ -61,6 +76,7 @@ final class MiniWindowSession: ObservableObject, Identifiable {
         authCompletionHandler: ((Bool, URL?) -> Void)? = nil
     ) {
         self.profile = profile
+        self.originalProfile = profile
         self.originName = originName
         self.currentSpaceLabel = currentSpaceLabel
         self.currentSpaceProfileName = currentSpaceProfileName
@@ -93,10 +109,22 @@ final class MiniWindowSession: ObservableObject, Identifiable {
 
     func selectCurrentSpace() {
         selectedDestinationId = nil
+        // Restore the profile the mini window was opened under so the WebView
+        // reloads under the original identity.
+        profile = originalProfile
     }
 
     func selectDestination(_ destination: MiniWindowSpaceDestination) {
         selectedDestinationId = destination.id
+        // Swap in the destination's profile. `MiniWindowWebView` reacts to
+        // this and recreates the WKWebView so cookies/session match.
+        if let pid = destination.profileId,
+           let bm = browserManager,
+           let newProfile = bm.profileManager.profiles.first(where: { $0.id == pid }) {
+            profile = newProfile
+        } else {
+            profile = originalProfile
+        }
     }
 
     var selectedDestination: MiniWindowSpaceDestination? {
@@ -220,6 +248,7 @@ final class ExternalMiniWindowManager {
             MiniWindowSpaceDestination(
                 id: space.id,
                 name: space.name,
+                profileId: space.profileId,
                 profileName: space.profileId.flatMap { profileLookup[$0] },
                 isCurrent: space.id == fallbackSpace?.id
             )
@@ -251,6 +280,7 @@ final class ExternalMiniWindowManager {
             },
             authCompletionHandler: authCompletionHandler
         )
+        session.browserManager = browserManager
 
         let controller = MiniBrowserWindowController(
             session: session,
