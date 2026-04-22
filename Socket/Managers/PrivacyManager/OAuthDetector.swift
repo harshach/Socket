@@ -12,10 +12,13 @@ enum OAuthDetector {
 
     // MARK: - Known Provider Hosts
 
-    /// Well-known OAuth/OIDC/SSO provider host suffixes.
-    /// Matched with `host == known || host.hasSuffix(".\(known)")` to avoid
-    /// false positives from substring matching (e.g. "mygithub.com" ≠ "github.com").
-    static let knownProviderHosts: [String] = [
+    /// Hosts whose primary purpose is authentication. A host match alone is
+    /// enough to consider the URL OAuth-ish. These pages are essentially never
+    /// used for anything BUT auth.
+    ///
+    /// Matched with `host == known || host.hasSuffix(".\(known)")` — substring
+    /// matching would false-positive on e.g. `mygithub.com` ≠ `github.com`.
+    static let dedicatedAuthHosts: [String] = [
         // Google
         "accounts.google.com",
         "identitytoolkit.googleapis.com",
@@ -30,11 +33,6 @@ enum OAuthDetector {
         // Apple
         "appleid.apple.com",
         "idmsa.apple.com",
-
-        // GitHub / GitLab / Bitbucket
-        "github.com",
-        "gitlab.com",
-        "bitbucket.org",
 
         // Auth0 (also *.auth0.com custom domains)
         "auth0.com",
@@ -57,44 +55,16 @@ enum OAuthDetector {
         // Cloudflare Access
         "cloudflareaccess.com",
 
-        // Slack
-        "slack.com",
-
-        // Zoom
-        "zoom.us",
-
-        // Facebook / Meta
-        "facebook.com",
-        "m.facebook.com",
-
         // Amazon / AWS
         "signin.aws.amazon.com",
         "auth.aws.amazon.com",
         "amazoncognito.com",                // AWS Cognito hosted UI
 
-        // LinkedIn
-        "linkedin.com",
-        "www.linkedin.com",
-
-        // Twitter / X
-        "twitter.com",
-        "api.twitter.com",
-        "x.com",
-
-        // Discord
-        "discord.com",
-
         // Twitch
         "id.twitch.tv",
 
-        // Dropbox
-        "dropbox.com",
-
         // Spotify
         "accounts.spotify.com",
-
-        // Reddit
-        "reddit.com",
 
         // Yahoo
         "login.yahoo.com",
@@ -105,9 +75,6 @@ enum OAuthDetector {
         // Salesforce
         "login.salesforce.com",
         "test.salesforce.com",
-
-        // HubSpot
-        "app.hubspot.com",
 
         // Box
         "account.box.com",
@@ -122,22 +89,43 @@ enum OAuthDetector {
         // Stripe Connect
         "connect.stripe.com",
 
-        // Notion
-        "www.notion.so",
-
-        // Figma
-        "www.figma.com",
-
         // Shopify
         "accounts.shopify.com",
 
         // Twilio / SendGrid
         "login.twilio.com",
-
-        // GitHub Enterprise Server uses custom domains; detected by path patterns below.
-        // Keycloak uses custom domains; detected by path patterns below.
-        // Dex uses custom domains; detected by path patterns below.
     ]
+
+    /// Hosts that *also* offer OAuth but are primarily general-web destinations.
+    /// A visit here counts as OAuth only when the path also looks OAuth-ish —
+    /// otherwise everyday navigation (github.com/foo/bar, linkedin.com/in/me)
+    /// would be mis-routed through the OAuth popup flow (which shows a tiny
+    /// mini-window that auto-dismisses when navigation stays on the host).
+    static let mixedUseOAuthHosts: [String] = [
+        "github.com",
+        "gitlab.com",
+        "bitbucket.org",
+        "slack.com",
+        "zoom.us",
+        "facebook.com",
+        "m.facebook.com",
+        "linkedin.com",
+        "www.linkedin.com",
+        "twitter.com",
+        "api.twitter.com",
+        "x.com",
+        "discord.com",
+        "dropbox.com",
+        "reddit.com",
+        "app.hubspot.com",
+        "www.notion.so",
+        "www.figma.com",
+    ]
+
+    /// Union used by callers that only need a coarse "is it an auth provider"
+    /// signal (e.g. the in-page assist banner). For popup routing use
+    /// `matchesKnownProvider(host:path:)` instead.
+    static var knownProviderHosts: [String] { dedicatedAuthHosts + mixedUseOAuthHosts }
 
     // MARK: - Public API
 
@@ -150,7 +138,7 @@ enum OAuthDetector {
         let path = url.path.lowercased()
         let query = url.query?.lowercased() ?? ""
 
-        if matchesKnownProvider(host: host) { return true }
+        if matchesKnownProvider(host: host, path: path) { return true }
         if hasStrongOAuthPath(path) { return true }
         if hasOAuthQueryParams(query) { return true }
 
@@ -184,11 +172,30 @@ enum OAuthDetector {
 
     // MARK: - Helpers (internal for testing)
 
-    static func matchesKnownProvider(host: String) -> Bool {
-        for known in knownProviderHosts {
+    /// Dedicated-auth hosts match on host alone. Mixed-use hosts additionally
+    /// require the path to look OAuth-ish, so e.g. github.com/foo/bar (a plain
+    /// repo page) isn't mistaken for an auth URL.
+    static func matchesKnownProvider(host: String, path: String = "") -> Bool {
+        for known in dedicatedAuthHosts {
             if host == known || host.hasSuffix(".\(known)") { return true }
         }
+        for known in mixedUseOAuthHosts {
+            guard host == known || host.hasSuffix(".\(known)") else { continue }
+            if pathLooksLikeOAuth(path) { return true }
+        }
         return false
+    }
+
+    /// Path signals acceptable on mixed-use hosts. Intentionally narrower than
+    /// `hasStrongOAuthPath` — we want to catch real auth paths without catching
+    /// e.g. "/login" pages that are purely informational.
+    private static func pathLooksLikeOAuth(_ path: String) -> Bool {
+        let needles = [
+            "/oauth/", "/oauth2/", "/login/oauth",
+            "/connect/authorize", "/authorize", "/sso/",
+            "/saml/", "/openid/",
+        ]
+        return needles.contains(where: { path.contains($0) })
     }
 
     // MARK: - Private
