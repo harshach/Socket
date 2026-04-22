@@ -10,14 +10,16 @@ struct TabCompositorView: NSViewRepresentable {
         let view = NSView()
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.clear.cgColor
+        view.appearance = systemContentAppearance()
         return view
     }
-    
+
     func updateNSView(_ nsView: NSView, context: Context) {
         // Update the compositor when tabs change or compositor version changes
+        nsView.appearance = systemContentAppearance()
         updateCompositor(nsView)
     }
-    
+
     private func updateCompositor(_ containerView: NSView) {
         // Remove all existing webview subviews
         containerView.subviews.forEach { $0.removeFromSuperview() }
@@ -28,13 +30,24 @@ struct TabCompositorView: NSViewRepresentable {
               !currentTab.isUnloaded else {
             return
         }
-        
+
         // Create a window-specific web view for this tab
         let webView = getOrCreateWebView(for: currentTab, in: windowState.id)
         webView.frame = containerView.bounds
         webView.autoresizingMask = [.width, .height]
+        // Window-level preferredColorScheme (driven by sidebar gradient) forces
+        // NSAppearance.darkAqua on windows with dark-perceived gradients. That
+        // bleeds into WebKit's native form controls (checkboxes, radios) so they
+        // render dark-mode on light pages — e.g. GitHub checkboxes as black
+        // squares. Pin the webview to the *system* appearance instead.
+        webView.appearance = systemContentAppearance()
         containerView.addSubview(webView)
         webView.isHidden = false
+    }
+
+    private func systemContentAppearance() -> NSAppearance? {
+        let isDark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        return NSAppearance(named: isDark ? .darkAqua : .aqua)
     }
     
     private func getOrCreateWebView(for tab: Tab, in windowId: UUID) -> WKWebView {
@@ -90,14 +103,18 @@ class TabCompositorManager: ObservableObject {
     
     func unloadTab(_ tab: Tab) {
         print("🔄 [Compositor] Unloading tab: \(tab.name)")
-        
+
         // Stop any existing timer
         unloadTimers[tab.id]?.invalidate()
         unloadTimers.removeValue(forKey: tab.id)
         lastAccessTimes.removeValue(forKey: tab.id)
-        
+
         // Unload the webview
         tab.unloadWebView()
+
+        // The coordinator caches a webview per (tabId, windowId). Without clearing it,
+        // reactivation returns the torn-down reference and renders blank.
+        browserManager?.webViewCoordinator?.removeAllWebViews(for: tab)
     }
     
     func loadTab(_ tab: Tab) {

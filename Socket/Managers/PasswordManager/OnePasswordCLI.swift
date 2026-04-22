@@ -28,6 +28,14 @@ final class OnePasswordCLI {
         let signedIn: Bool
         let account: String?
         let email: String?
+        /// True when `op account list` returns at least one configured account,
+        /// even if the active session is locked / unavailable. Distinguishes
+        /// "never configured" from "configured but locked right now" in the UI.
+        let hasAccountsConfigured: Bool
+        /// Last diagnostic from a failed CLI invocation (trimmed stderr).
+        /// Shown in Settings when detection doesn't pan out so users can
+        /// self-serve (e.g. see "Enable biometric unlock" when relevant).
+        let lastError: String?
     }
 
     enum CLIError: Error {
@@ -42,6 +50,14 @@ final class OnePasswordCLI {
 
     /// Cached `op` binary URL (derived from `detectBinary()`).
     private(set) var binaryURL: URL?
+
+    /// How we invoke `op`. GUI apps get a stripped environment — no
+    /// `OP_SESSION_*`, no `OP_ACCOUNT`, no custom PATH. Running the command
+    /// through the user's login shell picks up anything they've exported in
+    /// `.zshenv` / `.zprofile` / `.bash_profile`, which is typically where
+    /// `eval $(op signin)` and friends end up.
+    private enum InvocationMode { case direct, loginShell }
+    private var invocationMode: InvocationMode = .direct
 
     /// Cached login list from last refresh + timestamp for TTL.
     private var cachedLogins: [OnePasswordItem] = []
@@ -86,17 +102,139 @@ final class OnePasswordCLI {
 
     func status() async -> Status {
         guard let binary = binaryURL else {
-            return Status(binaryURL: nil, signedIn: false, account: nil, email: nil)
+            return Status(binaryURL: nil,
+                          signedIn: false,
+                          account: nil,
+                          email: nil,
+                          hasAccountsConfigured: false,
+                          lastError: nil)
         }
-        switch await run(binary: binary, args: ["whoami", "--format=json"]) {
+        // Try direct invocation first (fast). If that fails, retry through the
+        // user's login shell so we inherit `.zshenv` / `.zprofile` exports.
+        // Record both outcomes so the diagnostic panel can show the actual
+        // failure reason from each mode.
+        invocationMode = .direct
+        let directResult = await run(binary: binary, args: ["whoami", "--format=json"])
+        var whoamiResult = directResult
+        var shellDetail: String? = nil
+
+        if case .failure = whoamiResult {
+            invocationMode = .loginShell
+            let shellResult = await run(binary: binary, args: ["whoami", "--format=json"])
+            whoamiResult = shellResult
+            if case .failure(let err) = shellResult {
+                shellDetail = Self.describe(err)
+            }
+        }
+
+        // Secondary: `op account list` reveals whether the user has ever run
+        // `op account add` (or the desktop app auto-configured them). We do
+        // this via the shell mode when available so we see the SAME account
+        // set the user's terminal sees.
+        var hasAccountsConfigured = false
+        var fallbackAccount: String? = nil
+        var accountListSummary: String? = nil
+        var accounts: [OnePasswordAccount] = []
+        if case .success(let listStdout) = await run(binary: binary,
+                                                     args: ["account", "list", "--format=json"]) {
+            accounts = Self.parseAccountList(listStdout)
+            hasAccountsConfigured = !accounts.isEmpty
+            fallbackAccount = accounts.first?.url
+            if !accounts.isEmpty {
+                let lines = accounts.map { acct -> String in
+                    let url = acct.url ?? "(no url)"
+                    let email = acct.email ?? "(no email)"
+                    return "• \(email) — \(url)"
+                }
+                accountListSummary = "Accounts known to `op`:\n" + lines.joined(separator: "\n")
+            }
+        }
+
+        // Tertiary: default whoami often fails on multi-account setups where
+        // the default is locked but another account has an active session.
+        // Probe each known account by URL so we surface any reachable one.
+        if case .failure = whoamiResult {
+            for account in accounts {
+                guard let url = account.url, !url.isEmpty else { continue }
+                let perAccount = await run(binary: binary,
+                                           args: ["whoami", "--account=\(url)", "--format=json"])
+                if case .success(let perAccountStdout) = perAccount {
+                    let parsed = Self.parseWhoami(perAccountStdout)
+                    if parsed.signedIn {
+                        return Status(
+                            binaryURL: binary,
+                            signedIn: true,
+                            account: parsed.account ?? url,
+                            email: parsed.email ?? account.email,
+                            hasAccountsConfigured: true,
+                            lastError: nil
+                        )
+                    }
+                }
+            }
+        }
+
+        switch whoamiResult {
         case .success(let stdout):
             let parsed = Self.parseWhoami(stdout)
+            if parsed.signedIn {
+                return Status(binaryURL: binary,
+                              signedIn: true,
+                              account: parsed.account,
+                              email: parsed.email,
+                              hasAccountsConfigured: hasAccountsConfigured,
+                              lastError: nil)
+            }
+            // Whoami succeeded (exit 0) but output didn't parse — treat as
+            // unknown state. Surface the raw output so users can see what op
+            // actually said.
+            let rawHint = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.notice("op whoami returned unparseable output: \(rawHint, privacy: .public)")
             return Status(binaryURL: binary,
-                          signedIn: parsed.signedIn,
-                          account: parsed.account,
-                          email: parsed.email)
-        case .failure:
-            return Status(binaryURL: binary, signedIn: false, account: nil, email: nil)
+                          signedIn: false,
+                          account: fallbackAccount,
+                          email: nil,
+                          hasAccountsConfigured: hasAccountsConfigured,
+                          lastError: rawHint.isEmpty ? nil : rawHint)
+
+        case .failure(let err):
+            let primary = Self.describe(err)
+            logger.notice("op whoami failed: \(primary, privacy: .public)")
+            var parts: [String] = []
+            parts.append("Direct invocation: \(Self.describe(Self.resultAsError(directResult)))")
+            if let shellDetail { parts.append("Login-shell invocation: \(shellDetail)") }
+            if let accountListSummary { parts.append(accountListSummary) }
+            parts.append("SHELL=\(ProcessInfo.processInfo.environment["SHELL"] ?? "(unset)")")
+            parts.append("Tip: if Desktop App Integration is on, ensure Socket is Developer-ID signed (ad-hoc/unsigned callers can be refused by the 1Password helper).")
+            parts.append("Tip: `OP_SESSION_*` vars set in `.zshrc` are NOT inherited — move them to `.zshenv` or `.zprofile`.")
+            let combined = parts.joined(separator: "\n\n")
+            return Status(binaryURL: binary,
+                          signedIn: false,
+                          account: fallbackAccount,
+                          email: nil,
+                          hasAccountsConfigured: hasAccountsConfigured,
+                          lastError: combined)
+        }
+    }
+
+    /// Collapses a RunResult to its stderr/description. nil when it succeeded.
+    private static func resultAsError(_ r: RunResult) -> CLIError {
+        if case .failure(let err) = r { return err }
+        return .invocationFailed(exitCode: 0, stderr: "(succeeded)")
+    }
+
+    /// Human-readable one-line summary of a `CLIError`.
+    private static func describe(_ err: CLIError) -> String {
+        switch err {
+        case .invocationFailed(let code, let stderr):
+            let s = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return s.isEmpty ? "exit \(code)" : "exit \(code): \(s)"
+        case .notSignedIn:
+            return "not signed in"
+        case .binaryNotFound:
+            return "op binary not found"
+        case .decodingFailed:
+            return "op output didn't parse"
         }
     }
 
@@ -156,6 +294,33 @@ final class OnePasswordCLI {
         case .failure(let err):
             logger.error("op item list failed: \(String(describing: err), privacy: .public)")
             return []
+        }
+    }
+
+    struct OnePasswordAccount: Equatable {
+        let id: String
+        let email: String?
+        let url: String?
+    }
+
+    /// Pure parser for `op account list --format=json`. Returns one entry per
+    /// configured account regardless of current unlock state.
+    static func parseAccountList(_ stdout: String) -> [OnePasswordAccount] {
+        guard let data = stdout.data(using: .utf8),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return array.compactMap { raw in
+            // op's schema has `account_uuid`, `user_uuid`, `email`, `url`, `shorthand`.
+            let id = (raw["account_uuid"] as? String)
+                ?? (raw["user_uuid"] as? String)
+                ?? (raw["shorthand"] as? String)
+            guard let uuid = id else { return nil }
+            return OnePasswordAccount(
+                id: uuid,
+                email: raw["email"] as? String,
+                url: raw["url"] as? String
+            )
         }
     }
 
@@ -265,11 +430,27 @@ final class OnePasswordCLI {
     }
 
     private func run(binary: URL, args: [String]) async -> RunResult {
-        await withCheckedContinuation { continuation in
+        let mode = invocationMode
+        return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
-                process.executableURL = binary
-                process.arguments = args
+                switch mode {
+                case .direct:
+                    process.executableURL = binary
+                    process.arguments = args
+                case .loginShell:
+                    // Run via `zsh -l -c "<escaped op + args>"` (or the user's
+                    // $SHELL). `-l` sources login init files, which is where
+                    // `OP_SESSION_*` / `OP_ACCOUNT` / PATH additions live in
+                    // a typical setup.
+                    let shell = ProcessInfo.processInfo.environment["SHELL"]
+                        ?? "/bin/zsh"
+                    let command = ([binary.path] + args)
+                        .map(Self.shellEscape)
+                        .joined(separator: " ")
+                    process.executableURL = URL(fileURLWithPath: shell)
+                    process.arguments = ["-l", "-c", command]
+                }
 
                 let stdout = Pipe()
                 let stderr = Pipe()
@@ -306,5 +487,16 @@ final class OnePasswordCLI {
                 }
             }
         }
+    }
+
+    /// POSIX single-quote escape: wrap in `'...'`, escape embedded `'` as
+    /// `'\''`. Bare alphanumerics pass through unquoted. `nonisolated` so it
+    /// can be called from the background queue where we build the command.
+    private nonisolated static func shellEscape(_ s: String) -> String {
+        if s.isEmpty { return "''" }
+        if s.range(of: "[^A-Za-z0-9_./:-]", options: .regularExpression) == nil {
+            return s
+        }
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

@@ -115,7 +115,8 @@ final class PasswordManager: ObservableObject {
     private let store: PasswordCredentialStore
     let onePassword: OnePasswordCLI
     @Published private(set) var onePasswordStatus: OnePasswordCLI.Status = .init(
-        binaryURL: nil, signedIn: false, account: nil, email: nil
+        binaryURL: nil, signedIn: false, account: nil, email: nil,
+        hasAccountsConfigured: false, lastError: nil
     )
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Socket",
                                 category: "Passwords")
@@ -163,20 +164,40 @@ final class PasswordManager: ObservableObject {
 
         // Gather keychain-local usernames synchronously; 1Password is async so
         // we kick off a task and extend the hint list in place.
-        let keychainHits = store.fetchAll(for: payload.host,
-                                          profile: profile.id,
-                                          includePassword: false)
-        pushHints(tab: tab, usernames: keychainHits.map { $0.username })
+        let socketHits = store.fetchAll(for: payload.host,
+                                        profile: profile.id,
+                                        includePassword: false)
+        let systemHits = store.fetchSystemKeychain(for: payload.host)
+        let keychainUsernames = mergeUnique(primary: socketHits, system: systemHits)
+            .map { $0.username }
+        pushHints(tab: tab, usernames: keychainUsernames)
 
         if onePasswordStatus.signedIn {
             Task { [weak self] in
                 guard let self else { return }
                 let items = await self.onePassword.logins(for: payload.host)
-                let combined = keychainHits.map { $0.username }
-                    + items.compactMap { $0.username }
+                let combined = keychainUsernames + items.compactMap { $0.username }
                 self.pushHints(tab: tab, usernames: combined)
             }
         }
+    }
+
+    /// Socket-owned records first, then system-Keychain records that don't
+    /// duplicate a Socket entry (same host + username + persistentRef).
+    private func mergeUnique(primary: [PasswordCredentialStore.Record],
+                             system: [PasswordCredentialStore.Record]) -> [PasswordCredentialStore.Record] {
+        var seenRefs = Set<Data>(primary.map { $0.persistentRef })
+        var seenKeys = Set<String>(primary.map { "\($0.host)\u{1F}\($0.username)" })
+        var out = primary
+        for rec in system {
+            if seenRefs.contains(rec.persistentRef) { continue }
+            let key = "\(rec.host)\u{1F}\(rec.username)"
+            if seenKeys.contains(key) { continue }
+            seenRefs.insert(rec.persistentRef)
+            seenKeys.insert(key)
+            out.append(rec)
+        }
+        return out
     }
 
     private func pushHints(tab: Tab, usernames: [String]) {
@@ -200,10 +221,15 @@ final class PasswordManager: ObservableObject {
             return
         }
 
-        // Keychain source.
-        let keychainRecords = store.fetchAll(for: payload.host,
-                                             profile: profile.id,
-                                             includePassword: false)
+        // Keychain source — Socket's own records PLUS anything Safari /
+        // iCloud Keychain / System Settings have stored for this host.
+        // System entries may trigger a one-time macOS "allow access"
+        // prompt; Always Allow makes it silent after that.
+        let socketRecords = store.fetchAll(for: payload.host,
+                                           profile: profile.id,
+                                           includePassword: false)
+        let systemRecords = store.fetchSystemKeychain(for: payload.host)
+        let keychainRecords = mergeUnique(primary: socketRecords, system: systemRecords)
         let keychainSuggestions: [CredentialSuggestion] = keychainRecords.map { record in
             CredentialSuggestion(provider: .keychain,
                                  ref: record.persistentRef.base64EncodedString(),
@@ -530,7 +556,14 @@ final class PasswordManager: ObservableObject {
 
     func fetchAllForSettings() -> [PasswordCredentialStore.Record] {
         guard let profile = currentProfile() else { return [] }
-        return store.fetchAllForProfile(profile.id)
+        // Combine Socket-owned records (service-scoped to this profile)
+        // with every other `kSecClassInternetPassword` entry in the user's
+        // Keychain (Safari, iCloud, System Settings → Passwords, other
+        // apps). Socket entries take precedence on dedup; same-host+user
+        // system duplicates fall through.
+        let socketRecords = store.fetchAllForProfile(profile.id)
+        let systemRecords = store.fetchAllSystemKeychain()
+        return mergeUnique(primary: socketRecords, system: systemRecords)
     }
 
     func delete(_ ref: Data) {

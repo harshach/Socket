@@ -190,6 +190,56 @@ final class PasswordCredentialStore {
         #endif
     }
 
+    /// Read every `kSecClassInternetPassword` entry across all hosts,
+    /// regardless of which app created it. Used for the Settings list so
+    /// users see entries they saved in Safari / iCloud Keychain / System
+    /// Settings → Passwords alongside Socket's own records.
+    ///
+    /// macOS shows "Socket wants to use your confidential information" per
+    /// entry on first access. An "Always Allow" response silences it.
+    func fetchAllSystemKeychain() -> [Record] {
+        #if canImport(Security)
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassInternetPassword,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+            kSecReturnPersistentRef as String: true,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
+        ]
+        applyDataProtection(to: &query)
+        return runQueryAll(query)
+        #else
+        return []
+        #endif
+    }
+
+    /// Read every `kSecClassInternetPassword` entry for this host **regardless
+    /// of which app created it** — Safari, iCloud Keychain, System Settings
+    /// → Passwords, other apps. No `kSecAttrService` filter.
+    ///
+    /// macOS may surface a "Socket wants to use your confidential information
+    /// stored in <entry>" prompt the first time; after "Always Allow" it's
+    /// silent. Used to merge system Keychain entries into autofill
+    /// suggestions so users see passwords they've already saved in Safari /
+    /// iCloud without having to re-save them in Socket.
+    func fetchSystemKeychain(for host: String) -> [Record] {
+        guard !host.isEmpty else { return [] }
+        #if canImport(Security)
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassInternetPassword,
+            kSecAttrServer as String: host,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+            kSecReturnPersistentRef as String: true,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
+        ]
+        applyDataProtection(to: &query)
+        return runQueryAll(query)
+        #else
+        return []
+        #endif
+    }
+
     func fetchAllForProfile(_ profile: UUID) -> [Record] {
         #if canImport(Security)
         var query: [String: Any] = [

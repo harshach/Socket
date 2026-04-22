@@ -18,22 +18,63 @@ struct PasswordsSettingsView: View {
     @State private var revealed: [Data: String] = [:]
     @State private var errorMessage: String?
 
+    enum Section: String, CaseIterable, Identifiable {
+        case keychain = "Keychain"
+        case onePassword = "1Password"
+        var id: String { rawValue }
+    }
+
+    @State private var section: Section = .keychain
+
     var body: some View {
         @Bindable var settings = socketSettings
 
         VStack(alignment: .leading, spacing: 16) {
             header
             defaultDestinationCard(settings: settings)
-            onePasswordStatusCard
+            sectionPicker
+            switch section {
+            case .keychain:
+                keychainSection(settings: settings)
+            case .onePassword:
+                onePasswordSection
+            }
+        }
+        .onAppear {
+            reload()
+            Task { await browserManager.passwordManager.refreshOnePasswordStatus() }
+        }
+    }
+
+    private var sectionPicker: some View {
+        Picker("", selection: $section) {
+            ForEach(Section.allCases) { s in
+                Text(s.rawValue).tag(s)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    @ViewBuilder
+    private func keychainSection(settings: SocketSettingsService) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
             searchField
             credentialsList
             Divider()
             iCloudSyncCard(settings: settings)
             exclusionListCard(settings: settings)
         }
-        .onAppear {
-            reload()
-            Task { await browserManager.passwordManager.refreshOnePasswordStatus() }
+    }
+
+    @ViewBuilder
+    private var onePasswordSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            onePasswordStatusCard
+            Text("1Password entries are managed in the 1Password app. Socket reads them via the `op` CLI when you sign in to a website, and routes saves via `op item create` when you choose 1Password as the destination.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -113,9 +154,58 @@ struct PasswordsSettingsView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else if !status.signedIn {
-                Text("CLI found but not signed in. Enable biometric CLI unlock in 1Password → Settings → Developer, or run `op signin` in Terminal.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    if status.hasAccountsConfigured {
+                        // Accounts known to `op`, but no reachable session.
+                        // Most likely cause on a GUI-spawned op: the user's
+                        // OP_SESSION env var lives in an interactive shell
+                        // Socket can't inherit, and Desktop App Integration
+                        // isn't enabled.
+                        Text("1Password accounts are configured but Socket can't see an active session. This usually means Desktop App Integration isn't enabled.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.primary)
+                        Text("Fix in 1Password → Settings → Developer: enable **Integrate with 1Password CLI** and **Use biometric unlock for 1Password CLI**. Then click refresh here.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            Button("Open 1Password") {
+                                NSWorkspace.shared.launchApplication("1Password")
+                            }
+                            .controlSize(.small)
+                            Button("1Password Docs") {
+                                if let url = URL(string: "https://developer.1password.com/docs/cli/app-integration/") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .controlSize(.small)
+                        }
+                    } else {
+                        Text("CLI found. Enable biometric CLI unlock in 1Password → Settings → Developer, or run `op signin` in Terminal to connect an account.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let url = status.account {
+                        Text(url)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary.opacity(0.9))
+                            .textSelection(.enabled)
+                    }
+                    if let err = status.lastError, !err.isEmpty {
+                        DisclosureGroup("Diagnostic details") {
+                            Text(err)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(Color.primary.opacity(0.05))
+                                )
+                        }
+                        .font(.system(size: 10))
+                    }
+                }
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     if let email = status.email {
