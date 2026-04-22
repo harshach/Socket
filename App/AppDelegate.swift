@@ -382,8 +382,12 @@ extension AppDelegate {
 
     /// Called when update process encounters an error
     func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
+        let ns = error as NSError
+        Self.log.error(
+            "Sparkle update aborted: \(ns.localizedDescription, privacy: .public) (domain=\(ns.domain, privacy: .public) code=\(ns.code))"
+        )
         Task { @MainActor in
-            browserManager?.handleUpdaterAbortedUpdate()
+            browserManager?.handleUpdaterAbortedUpdate(error: error)
         }
     }
 

@@ -269,6 +269,19 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // Debounce task for SPA navigation persistence
     private var spaPersistDebounceTask: Task<Void, Never>?
 
+    // Block-based title observation. Replaces NSObject KVO on "title" —
+    // SPAs mutate document.title without a real navigation, so the
+    // WKNavigationDelegate callbacks aren't enough. Swift's block-style
+    // observe is lighter than routing through observeValue(forKeyPath:).
+    private var titleObservation: NSKeyValueObservation?
+
+    // Block-based canGoBack / canGoForward observation. Fires exactly once
+    // per real property change and replaces the previous 3×-poll fallback
+    // (0ms / 100ms / 250ms asyncAfter) that existed to catch same-domain
+    // navigations where the delegate update lagged.
+    private var canGoBackObservation: NSKeyValueObservation?
+    private var canGoForwardObservation: NSKeyValueObservation?
+
     // MARK: - Tab State
     var isUnloaded: Bool {
         return _webView == nil
@@ -300,8 +313,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     var webView: WKWebView? {
         if _webView == nil {
             let stackSymbols = Thread.callStackSymbols.prefix(8).joined(separator: "\n  ")
-            print("🔍 [MEMDEBUG] Tab.webView LAZY ACCESS - Tab: \(id.uuidString.prefix(8)), URL: \(url.absoluteString)")
-            print("🔍 [MEMDEBUG] Stack trace:\n  \(stackSymbols)")
+            DLog("🔍 [MEMDEBUG] Tab.webView LAZY ACCESS - Tab: \(id.uuidString.prefix(8)), URL: \(url.absoluteString)")
+            DLog("🔍 [MEMDEBUG] Stack trace:\n  \(stackSymbols)")
             setupWebView()
         }
         return _webView
@@ -322,7 +335,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     /// Assigns the WebView to a specific window as its "primary" display
     /// Call this when a window first displays this tab
     func assignWebViewToWindow(_ webView: WKWebView, windowId: UUID) {
-        print("🔍 [MEMDEBUG] Tab.assignWebViewToWindow() - Tab: \(id.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(webView).toOpaque())")
+        DLog("🔍 [MEMDEBUG] Tab.assignWebViewToWindow() - Tab: \(id.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(webView).toOpaque())")
         
         // If we already have a WebView assigned to a different window, this is an error
         // (should have been caught by WebViewCoordinator)
@@ -340,7 +353,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             }
         }
 
-        print("🔍 [MEMDEBUG]   -> Primary window assigned: \(windowId.uuidString.prefix(8))")
+        DLog("🔍 [MEMDEBUG]   -> Primary window assigned: \(windowId.uuidString.prefix(8))")
     }
 
     weak var browserManager: BrowserManager?
@@ -510,19 +523,12 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         refreshNavigationAvailability()
     }
 
-    /// Enhanced navigation state update with aggressive timing for same-domain navigation
+    /// Navigation-state update from a WKNavigationDelegate callback. Block-based
+    /// KVO on canGoBack / canGoForward (installed in setupNavigationStateObservers)
+    /// picks up any changes that lag the delegate — no need for the 0/100/250ms
+    /// poll that was here previously.
     func updateNavigationStateEnhanced(source: String = "unknown") {
-        // Immediate update
         updateNavigationState()
-
-        // Additional delayed updates to catch timing issues with same-domain navigation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.updateNavigationState()
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.updateNavigationState()
-        }
     }
 
     var navigationHistoryForPersistence: [String] {
@@ -793,8 +799,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // MARK: - WebView Setup
 
     private func setupWebView() {
-        print("🔍 [MEMDEBUG] Tab.setupWebView() START - Tab: \(id.uuidString.prefix(8)), Name: \(name), URL: \(url.absoluteString)")
-        print("🔍 [MEMDEBUG]   _webView exists: \(_webView != nil), _existingWebView exists: \(_existingWebView != nil)")
+        DLog("🔍 [MEMDEBUG] Tab.setupWebView() START - Tab: \(id.uuidString.prefix(8)), Name: \(name), URL: \(url.absoluteString)")
+        DLog("🔍 [MEMDEBUG]   _webView exists: \(_webView != nil), _existingWebView exists: \(_existingWebView != nil)")
         
         let resolvedProfile = resolveProfile()
         let configuration: WKWebViewConfiguration
@@ -846,7 +852,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             let newWebView = FocusableWKWebView(frame: .zero, configuration: configuration)
             newWebView.underPageBackgroundColor = .white
             _webView = newWebView
-            print("🔍 [MEMDEBUG] Tab CREATED NEW PRIMARY WebView - Tab: \(id.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), ConfigStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
+            DLog("🔍 [MEMDEBUG] Tab CREATED NEW PRIMARY WebView - Tab: \(id.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), ConfigStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
             if let fv = _webView as? FocusableWKWebView {
                 fv.owningTab = self
                 fv.contextMenuBridge = WebContextMenuBridge(tab: self, configuration: configuration)
@@ -866,42 +872,15 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
 
         // Only set up script handlers and user agent for new WebViews
         // Existing WebViews (from Peek) already have these configured
-        if _existingWebView == nil {
-            // Remove existing handlers first to prevent duplicates
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "linkHover")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "commandHover")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "commandClick")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "pipStateChange")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "mediaStateChange_\(id.uuidString)")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "backgroundColor_\(id.uuidString)")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "historyStateDidChange")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "SocketIdentity")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "socketWebStore")
-            _webView?.configuration.userContentController.removeScriptMessageHandler(
-                forName: "socketShortcutDetect")
-
-            // Add handlers
-            _webView?.configuration.userContentController.add(self, name: "linkHover")
-            _webView?.configuration.userContentController.add(self, name: "commandHover")
-            _webView?.configuration.userContentController.add(self, name: "commandClick")
-            _webView?.configuration.userContentController.add(self, name: "pipStateChange")
-            _webView?.configuration.userContentController.add(
-                self, name: "mediaStateChange_\(id.uuidString)")
-            _webView?.configuration.userContentController.add(
-                self, name: "backgroundColor_\(id.uuidString)")
-            _webView?.configuration.userContentController.add(self, name: "historyStateDidChange")
-            _webView?.configuration.userContentController.add(self, name: "SocketIdentity")
-            _webView?.configuration.userContentController.add(self, name: "socketShortcutDetect")
-            _webView?.configuration.userContentController.addUserScript(
+        if _existingWebView == nil, let webView = _webView {
+            // Clean + re-register the canonical Socket handlers. The list
+            // lives in SocketMessageHandlers so every site (setup, unload,
+            // coordinator create, fallback cleanup) shares one source of
+            // truth — previously these were enumerated inline in 5+ places
+            // and drifted, causing the password-handler-missing bug.
+            SocketMessageHandlers.remove(from: webView, tabId: id)
+            SocketMessageHandlers.register(on: webView, for: self)
+            webView.configuration.userContentController.addUserScript(
                 WKUserScript(
                     source: WebsiteShortcutDetector.jsDetectionScript,
                     injectionTime: .atDocumentStart,
@@ -909,17 +888,19 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                 )
             )
 
-            // Add Web Store integration handler for Chrome Web Store extension installs
+            // Web-Store integration uses its own handler target (not Tab), so
+            // it lives outside the canonical set.
             if let browserManager = browserManager {
+                webView.configuration.userContentController.removeScriptMessageHandler(
+                    forName: "socketWebStore")
                 webStoreHandler = WebStoreScriptHandler(browserManager: browserManager)
-                _webView?.configuration.userContentController.add(
+                webView.configuration.userContentController.add(
                     webStoreHandler!, name: "socketWebStore")
 
-                // Inject Web Store script at setup time if already on Chrome Web Store
                 if BrowserConfiguration.isChromeWebStore(url),
                     let script = BrowserConfiguration.webStoreInjectorScript()
                 {
-                    _webView?.configuration.userContentController.addUserScript(script)
+                    webView.configuration.userContentController.addUserScript(script)
                 }
             }
 
@@ -952,9 +933,9 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
 
         // For existing WebViews, ensure the delegates are updated to point to this tab
         if _existingWebView != nil {
-            print("🔍 [MEMDEBUG] Tab setup COMPLETE (existing WebView) - Tab: \(id.uuidString.prefix(8))")
+            DLog("🔍 [MEMDEBUG] Tab setup COMPLETE (existing WebView) - Tab: \(id.uuidString.prefix(8))")
         } else {
-            print("🔍 [MEMDEBUG] Tab setup COMPLETE (new WebView) - Tab: \(id.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(_webView!).toOpaque())")
+            DLog("🔍 [MEMDEBUG] Tab setup COMPLETE (new WebView) - Tab: \(id.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(_webView!).toOpaque())")
         }
 
         // Inform extensions that this tab's view is now open/available BEFORE loading,
@@ -1668,33 +1649,16 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             }
         }
 
-        // Clean up message handlers - use comprehensive cleanup
-        let controller = webView.configuration.userContentController
-        let allMessageHandlers = [
-            "linkHover",
-            "commandHover",
-            "commandClick",
-            "pipStateChange",
-            "mediaStateChange_\(id.uuidString)",
-            "backgroundColor_\(id.uuidString)",
-            "historyStateDidChange",
-            "SocketIdentity",
-            "socketShortcutDetect",
-        ]
-
-        for handlerName in allMessageHandlers {
-            controller.removeScriptMessageHandler(forName: handlerName)
-        }
+        // Tear down the canonical Socket handlers plus the Tab-specific Web-Store
+        // handler (whose target isn't Tab).
+        SocketMessageHandlers.remove(from: webView, tabId: id)
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: "socketWebStore")
 
         // Remove from view hierarchy and clear delegates
         webView.removeFromSuperview()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
-
-        // FORCE TERMINATE THE WEB CONTENT PROCESS
-        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { _ in }
-        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { _ in }
-        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { _ in }
 
         // Remove theme color and navigation state observers before clearing webview reference
         if let webView = _webView {
@@ -1902,32 +1866,52 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
 
     // MARK: - Navigation State Observation
 
-    /// Set up KVO observers for navigation state properties
+    /// Set up observers for navigation state properties.
+    ///
+    /// canGoBack / canGoForward don't need KVO at all — WKNavigationDelegate
+    /// (didCommit / didFinish / didFail*) already calls
+    /// `updateNavigationStateEnhanced`, which reads the live values. The old
+    /// KVO path duplicated every delegate call with an extra main-thread hit.
+    ///
+    /// title still needs an observer (SPAs mutate document.title without a
+    /// nav), but block-based `webView.observe(\.title)` is cheaper than
+    /// NSObject KVO routed through `observeValue(forKeyPath:)`.
     func setupNavigationStateObservers(for webView: WKWebView) {
-        if !navigationStateObservedWebViews.contains(webView) {
-            webView.addObserver(
-                self, forKeyPath: "canGoBack", options: [.new, .initial], context: nil)
-            webView.addObserver(
-                self, forKeyPath: "canGoForward", options: [.new, .initial], context: nil)
-            webView.addObserver(
-                self, forKeyPath: "title", options: [.new], context: nil)
-            // NOTE: URL observer removed - it was firing during setup and overwriting
-            // restored URLs. URL updates are handled by didCommit/didFinish delegates.
-            navigationStateObservedWebViews.add(webView)
-            print("🔍 [Tab] Set up navigation state observers for \(name)")
+        guard !navigationStateObservedWebViews.contains(webView) else { return }
+        titleObservation?.invalidate()
+        canGoBackObservation?.invalidate()
+        canGoForwardObservation?.invalidate()
+
+        titleObservation = webView.observe(\.title, options: [.new]) { [weak self] wv, _ in
+            guard let self else { return }
+            guard let newTitle = wv.title, !newTitle.isEmpty, newTitle != self.name else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.updateTitle(newTitle)
+            }
         }
+        canGoBackObservation = webView.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.updateNavigationState()
+            }
+        }
+        canGoForwardObservation = webView.observe(\.canGoForward, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.updateNavigationState()
+            }
+        }
+        navigationStateObservedWebViews.add(webView)
     }
 
-    /// Remove KVO observers for navigation state properties
+    /// Tear down title + canGoBack / canGoForward observations.
     func removeNavigationStateObservers(from webView: WKWebView) {
-        if navigationStateObservedWebViews.contains(webView) {
-            webView.removeObserver(self, forKeyPath: "canGoBack")
-            webView.removeObserver(self, forKeyPath: "canGoForward")
-            webView.removeObserver(self, forKeyPath: "title")
-            // NOTE: URL observer removed - see setupNavigationStateObservers
-            navigationStateObservedWebViews.remove(webView)
-            print("🔍 [Tab] Removed navigation state observers for \(name)")
-        }
+        guard navigationStateObservedWebViews.contains(webView) else { return }
+        titleObservation?.invalidate()
+        titleObservation = nil
+        canGoBackObservation?.invalidate()
+        canGoBackObservation = nil
+        canGoForwardObservation?.invalidate()
+        canGoForwardObservation = nil
+        navigationStateObservedWebViews.remove(webView)
     }
 
     /// MEMORY LEAK FIX: Comprehensive WebView cleanup to prevent memory leaks
@@ -1974,23 +1958,10 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             }
         }
 
-        // 3. Remove ALL message handlers comprehensively
-        let controller = webView.configuration.userContentController
-        let allMessageHandlers = [
-            "linkHover",
-            "commandHover",
-            "commandClick",
-            "pipStateChange",
-            "mediaStateChange_\(id.uuidString)",
-            "backgroundColor_\(id.uuidString)",
-            "historyStateDidChange",
-            "SocketIdentity",
-            "socketShortcutDetect",
-        ]
-
-        for handlerName in allMessageHandlers {
-            controller.removeScriptMessageHandler(forName: handlerName)
-        }
+        // 3. Remove all Socket-owned message handlers (canonical + Web Store).
+        SocketMessageHandlers.remove(from: webView, tabId: id)
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: "socketWebStore")
 
         // 4. MEMORY LEAK FIX: Detach contextMenuBridge before clearing delegates
         // This breaks the retain cycle: WKWebView → contextMenuBridge → userContentController → WKWebView
@@ -2035,29 +2006,14 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?,
         context: UnsafeMutableRawPointer?
     ) {
+        // Only themeColor still uses NSObject KVO here. canGoBack / canGoForward
+        // are driven by the WKNavigationDelegate callbacks; title is observed via
+        // a block-based NSKeyValueObservation in setupNavigationStateObservers.
         if keyPath == "themeColor", let webView = object as? WKWebView {
             updateBackgroundColor(from: webView)
-        } else if keyPath == "canGoBack" || keyPath == "canGoForward",
-            let webView = object as? WKWebView
-        {
-            // Real-time navigation state updates from KVO observers
-            let observedKeyPath = keyPath ?? "<unknown>"
-            print(
-                "🔄 [Tab] KVO navigation state change for \(name): \(observedKeyPath) = \(webView.canGoBack), \(webView.canGoForward)"
-            )
-            updateNavigationState()
-        } else if keyPath == "title", let webView = object as? WKWebView {
-            // Real-time title updates from KVO (especially for SPAs)
-            if let newTitle = webView.title, !newTitle.isEmpty, newTitle != self.name {
-                print("📄 [Tab] KVO title change for \(name): '\(newTitle)'")
-                updateTitle(newTitle)
-            }
-        } else if keyPath == "URL", let webView = object as? WKWebView {
-            // URL observer disabled - was causing restored URLs to be overwritten
-            // URL updates are handled by didCommit/didFinish navigation delegates
-        } else {
-            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+            return
         }
+        super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
     }
 
     private func updateBackgroundColor(from webView: WKWebView) {
@@ -2342,17 +2298,48 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                 var isCommandPressed = false;
                 var hoverCheckInterval = null;
 
-                function sendLinkHover(href) {
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.linkHover) {
-                        window.webkit.messageHandlers.linkHover.postMessage(href);
+                // Trailing-edge debounce per channel. On link lists the pointer
+                // traverses dozens of <a>s in <100ms — without coalescing we
+                // post a bridge message for every mouseenter/mouseleave. 50ms
+                // is below perceptual threshold for a hover effect but far
+                // above the raw mouse event rate.
+                var HOVER_DEBOUNCE_MS = 50;
+                var pendingLinkHover = { href: undefined, timer: null };
+                var pendingCommandHover = { href: undefined, timer: null };
+
+                function flushChannel(state, handlerName) {
+                    state.timer = null;
+                    var href = state.href;
+                    state.href = undefined;
+                    // Backgrounded tabs can't actually be hovered — if the
+                    // document isn't visible, drop the post. Prevents cross-tab
+                    // hover storms from mattering when the user is focused
+                    // elsewhere.
+                    if (document.visibilityState !== 'visible') { return; }
+                    var handlers = window.webkit && window.webkit.messageHandlers;
+                    if (handlers && handlers[handlerName]) {
+                        handlers[handlerName].postMessage(href == null ? null : href);
                     }
                 }
 
-                function sendCommandHover(href) {
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.commandHover) {
-                        window.webkit.messageHandlers.commandHover.postMessage(href);
-                    }
+                function queueLinkHover(href) {
+                    pendingLinkHover.href = href;
+                    if (pendingLinkHover.timer != null) { return; }
+                    pendingLinkHover.timer = setTimeout(function () {
+                        flushChannel(pendingLinkHover, 'linkHover');
+                    }, HOVER_DEBOUNCE_MS);
                 }
+
+                function queueCommandHover(href) {
+                    pendingCommandHover.href = href;
+                    if (pendingCommandHover.timer != null) { return; }
+                    pendingCommandHover.timer = setTimeout(function () {
+                        flushChannel(pendingCommandHover, 'commandHover');
+                    }, HOVER_DEBOUNCE_MS);
+                }
+
+                function sendLinkHover(href) { queueLinkHover(href); }
+                function sendCommandHover(href) { queueCommandHover(href); }
 
                 // Track Command key state
                 document.addEventListener('keydown', function(e) {
@@ -2371,53 +2358,6 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                     }
                 });
 
-                // Use a completely passive approach - add invisible event listeners directly to links
-                function attachLinkListeners() {
-                    var links = document.querySelectorAll('a[href]');
-                    links.forEach(function(link) {
-                        if (!link.dataset.SocketListener) {
-                            link.dataset.SocketListener = 'true';
-
-                            link.addEventListener('mouseenter', function() {
-                                currentHoveredLink = link.href;
-                                sendLinkHover(link.href);
-                                if (isCommandPressed) {
-                                    sendCommandHover(link.href);
-                                }
-                            }, { passive: true });
-
-                            link.addEventListener('mouseleave', function() {
-                                if (currentHoveredLink === link.href) {
-                                    currentHoveredLink = null;
-                                    sendLinkHover(null);
-                                    sendCommandHover(null);
-                                }
-                            }, { passive: true });
-                        }
-                    });
-                }
-
-                // Initial attachment
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', attachLinkListeners);
-                } else {
-                    attachLinkListeners();
-                }
-
-                // Re-attach when DOM changes (for dynamic content)
-                var observer = new MutationObserver(function(mutations) {
-                    var needsReattach = false;
-                    mutations.forEach(function(mutation) {
-                        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                            needsReattach = true;
-                        }
-                    });
-                    if (needsReattach) {
-                        setTimeout(attachLinkListeners, 100);
-                    }
-                });
-                observer.observe(document.body, { childList: true, subtree: true });
-
                 function findAnchor(startNode) {
                     var target = startNode;
                     while (target && target !== document) {
@@ -2428,6 +2368,36 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                     }
                     return null;
                 }
+
+                // Event delegation (replaces per-link listener attachment +
+                // document-wide subtree MutationObserver). mouseover/mouseout
+                // bubble, so one pair of document-level listeners covers every
+                // present and future <a> on the page — no attachment churn on
+                // DOM mutations.
+                document.addEventListener('mouseover', function (e) {
+                    var anchor = findAnchor(e.target);
+                    if (!anchor) { return; }
+                    if (currentHoveredLink === anchor.href) { return; }
+                    currentHoveredLink = anchor.href;
+                    sendLinkHover(anchor.href);
+                    if (isCommandPressed) {
+                        sendCommandHover(anchor.href);
+                    }
+                }, { passive: true, capture: true });
+
+                document.addEventListener('mouseout', function (e) {
+                    var fromAnchor = findAnchor(e.target);
+                    if (!fromAnchor) { return; }
+                    // Only clear when the pointer actually left this anchor's
+                    // subtree (mouseout also fires when crossing nested children).
+                    var toAnchor = findAnchor(e.relatedTarget);
+                    if (toAnchor && toAnchor.href === fromAnchor.href) { return; }
+                    if (currentHoveredLink === fromAnchor.href) {
+                        currentHoveredLink = null;
+                        sendLinkHover(null);
+                        sendCommandHover(null);
+                    }
+                }, { passive: true, capture: true });
 
                 function handleModifiedLinkOpen(e) {
                     if (e.metaKey || e.shiftKey) {
@@ -3309,6 +3279,9 @@ extension Tab: WKScriptMessageHandler {
         case "linkHover":
             let href = message.body as? String
             DispatchQueue.main.async {
+                // Warm DNS / TCP / TLS against the hovered origin so a click
+                // has a head start. Dedup'd per-host for 30s inside the mgr.
+                PreconnectManager.shared.preconnect(href)
                 self.onLinkHover?(href)
             }
 

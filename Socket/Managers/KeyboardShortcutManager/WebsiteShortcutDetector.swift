@@ -241,12 +241,18 @@ extension WebsiteShortcutDetector {
     /// JavaScript to inject into web pages for runtime shortcut detection
     /// This attempts to detect keydown listeners that websites register
     static var jsDetectionScript: String {
-        """
+        // Only install the addEventListener hook when the user actually has the
+        // conflict-detection feature on. When it's off, the hook's work is pure
+        // overhead — every DOM event listener registration goes through a
+        // `listener.toString()` + regex scan, which is punishing on React/Vue
+        // apps that register thousands of listeners during hydration.
+        let shouldInstallHook = WebsiteShortcutProfile.isFeatureEnabled
+        return """
         (function() {
             // Only run once per page
             if (window.__socketShortcutDetectionActive) return;
             window.__socketShortcutDetectionActive = true;
-            
+
             // Track detected shortcuts
             const detectedShortcuts = new Set();
             let editableRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
@@ -255,44 +261,40 @@ extension WebsiteShortcutDetector {
                 editable: null,
                 shortcutSignature: ''
             };
-            
-            // Hook into addEventListener to catch keydown/keyup listeners
-            const originalAddEventListener = EventTarget.prototype.addEventListener;
-            EventTarget.prototype.addEventListener = function(type, listener, options) {
-                if (type === 'keydown') {
-                    // Try to parse the listener to extract key combinations
-                    // This is best-effort and won't catch all cases
-                    try {
-                        const listenerStr = listener.toString();
-                        
-                        // Look for patterns like e.key === 'k', e.code === 'KeyK', etc.
-                        const keyMatches = listenerStr.match(/(?:e|event)\\.key\\s*===\\s*['"]([\\w]+)['"]/g);
-                        const codeMatches = listenerStr.match(/(?:e|event)\\.code\\s*===\\s*['"]([\\w]+)['"]/g);
-                        
-                        if (keyMatches) {
-                            keyMatches.forEach(m => {
-                                const key = m.match(/['"]([\\w]+)['"]/)?.[1]?.toLowerCase();
-                                if (key) detectedShortcuts.add(key);
-                            });
-                        }
-                        
-                        // Look for modifier checks
-                        const hasCmd = listenerStr.includes('.metaKey') || listenerStr.includes('.ctrlKey');
-                        const hasShift = listenerStr.includes('.shiftKey');
-                        const hasAlt = listenerStr.includes('.altKey');
-                        const hasCtrl = listenerStr.includes('.ctrlKey') && !listenerStr.includes('.metaKey');
-                        
-                        // Store modifier patterns for later
-                        if (hasCmd || hasShift || hasAlt || hasCtrl) {
-                            // Mark that this listener uses modifiers
-                            window.__socketUsesModifiers = true;
-                        }
-                    } catch (e) {
-                        // Ignore parsing errors
+
+            // Hook into addEventListener to catch keydown listeners — gated on
+            // the native feature flag and deduplicated by listener identity so
+            // the same function registered repeatedly (React re-renders) is
+            // parsed exactly once.
+            if (\(shouldInstallHook ? "true" : "false")) {
+                const parsedListeners = new WeakSet();
+                const originalAddEventListener = EventTarget.prototype.addEventListener;
+                EventTarget.prototype.addEventListener = function(type, listener, options) {
+                    if (type === 'keydown' && listener && typeof listener === 'function' && !parsedListeners.has(listener)) {
+                        parsedListeners.add(listener);
+                        try {
+                            const listenerStr = listener.toString();
+                            // Skip native / minified short stubs that can't possibly match.
+                            if (listenerStr.length > 24 && listenerStr.indexOf('[native code]') === -1) {
+                                const keyMatches = listenerStr.match(/(?:e|event)\\.key\\s*===\\s*['"]([\\w]+)['"]/g);
+                                if (keyMatches) {
+                                    keyMatches.forEach(m => {
+                                        const key = m.match(/['"]([\\w]+)['"]/)?.[1]?.toLowerCase();
+                                        if (key) detectedShortcuts.add(key);
+                                    });
+                                }
+                                if (listenerStr.indexOf('.metaKey') !== -1 ||
+                                    listenerStr.indexOf('.shiftKey') !== -1 ||
+                                    listenerStr.indexOf('.altKey') !== -1 ||
+                                    listenerStr.indexOf('.ctrlKey') !== -1) {
+                                    window.__socketUsesModifiers = true;
+                                }
+                            }
+                        } catch (e) { /* ignore parse errors */ }
                     }
-                }
-                return originalAddEventListener.call(this, type, listener, options);
-            };
+                    return originalAddEventListener.call(this, type, listener, options);
+                };
+            }
             
             // Also try to detect accesskey attributes
             function checkAccessKeys() {
@@ -439,6 +441,9 @@ extension WebsiteShortcutDetector {
                 if (!window.webkit?.messageHandlers?.socketShortcutDetect) {
                     return;
                 }
+                // Hidden tabs can't receive keystrokes — drop state reports.
+                // The next visibilitychange event will reassert the truth.
+                if (document.visibilityState !== 'visible' && !force) { return; }
 
                 const activeTarget = activeEditableTarget(document);
                 const isEditableFocused = isEditableElement(activeTarget);
@@ -478,8 +483,10 @@ extension WebsiteShortcutDetector {
                 }, 0);
             }
             
-            // Report periodically and on common focus/input transitions used by SPAs.
-            setInterval(() => reportState(false), 750);
+            // Event-driven reporting only. The previous 750ms setInterval fired
+            // ~1.3 Hz per tab forever, and the listeners below already cover
+            // every actual source of change (focus / keypress / selection /
+            // visibility / DOM mutation on editable attributes).
             document.addEventListener('visibilitychange', () => queueReport(true), true);
             document.addEventListener('focusin', () => queueReport(true), true);
             document.addEventListener('focusout', () => queueReport(true), true);

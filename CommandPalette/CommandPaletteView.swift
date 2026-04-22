@@ -7,7 +7,6 @@
 
 import AppKit
 import SwiftUI
-import UniversalGlass
 import Garnish
 
 struct CommandPaletteView: View {
@@ -71,11 +70,13 @@ struct CommandPaletteView: View {
     }
 
     var body: some View {
-        let isDark = colorScheme == .dark
+        // SigmaOS-style: the palette is always rendered against a dark surface
+        // so the contents read consistently regardless of window/system theme.
+        let isDark = true
         let isVisible = commandPalette.isVisible
         let textFieldColor: Color = text.isEmpty
-            ? (isDark ? .white.opacity(0.25) : .black.opacity(0.25))
-            : (isDark ? .white.opacity(0.9) : .black.opacity(0.9))
+            ? .white.opacity(0.35)
+            : .white.opacity(0.95)
 
         return ZStack {
             Color.clear
@@ -192,20 +193,20 @@ struct CommandPaletteView: View {
                                         HStack(spacing: 6) {
                                             Text("Search \(match.name)")
                                                 .font(.system(size: 14, weight: .medium))
-                                                .foregroundStyle(isDark ? .white.opacity(0.3) : .black.opacity(0.3))
+                                                .foregroundStyle(.white.opacity(0.4))
 
                                             Text("Tab")
                                                 .font(.system(size: 11, weight: .medium))
-                                                .foregroundStyle(isDark ? .white.opacity(0.4) : .black.opacity(0.4))
+                                                .foregroundStyle(.white.opacity(0.5))
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
                                                 .background(
                                                     RoundedRectangle(cornerRadius: 4)
-                                                        .fill(isDark ? .white.opacity(0.1) : .black.opacity(0.08))
+                                                        .fill(.white.opacity(0.12))
                                                 )
                                                 .overlay(
                                                     RoundedRectangle(cornerRadius: 4)
-                                                        .stroke(isDark ? .white.opacity(0.15) : .black.opacity(0.12), lineWidth: 0.5)
+                                                        .stroke(.white.opacity(0.18), lineWidth: 0.5)
                                                 )
                                         }
                                         .allowsHitTesting(false)
@@ -215,6 +216,28 @@ struct CommandPaletteView: View {
                                         )
                                     }
                                 }
+
+                                presentationModeButton(
+                                    label: "Replace",
+                                    symbol: "option",
+                                    isActive: commandPalette.presentationMode == .replaceCurrentPage,
+                                    toggle: {
+                                        commandPalette.presentationMode =
+                                            commandPalette.presentationMode == .replaceCurrentPage
+                                                ? .newTab : .replaceCurrentPage
+                                    }
+                                )
+
+                                presentationModeButton(
+                                    label: "Split Screen",
+                                    symbol: "shift",
+                                    isActive: commandPalette.presentationMode == .splitRight,
+                                    toggle: {
+                                        commandPalette.presentationMode =
+                                            commandPalette.presentationMode == .splitRight
+                                                ? .newTab : .splitRight
+                                    }
+                                )
                             }
                             .animation(.spring(response: 0.35, dampingFraction: 0.75), value: activeSiteSearch != nil)
                             .padding(.vertical, 8)
@@ -222,11 +245,7 @@ struct CommandPaletteView: View {
 
                             if !visibleSuggestions.isEmpty {
                                 RoundedRectangle(cornerRadius: 100)
-                                    .fill(
-                                        isDark
-                                            ? Color.white.opacity(0.4)
-                                            : Color.black.opacity(0.4)
-                                    )
+                                    .fill(Color.white.opacity(0.12))
                                     .frame(height: 0.5)
                                     .frame(maxWidth: .infinity)
                             }
@@ -245,11 +264,13 @@ struct CommandPaletteView: View {
                         .padding(10)
                         .frame(maxWidth: .infinity)
                         .frame(width: effectiveCommandPaletteWidth)
-                        .background(Color(.windowBackgroundColor).opacity(0.35))
+                        .background(Color(white: 0.11).opacity(0.97))
                         .clipShape(.rect(cornerRadius: 26))
-                        .universalGlassEffect(
-                            .regular.tint(Color(.windowBackgroundColor).opacity(0.35)),
-                            in: .rect(cornerRadius: 26))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 26)
+                                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                        )
+                        .shadow(color: .black.opacity(0.45), radius: 30, y: 12)
                         .animation(
                             .easeInOut(duration: 0.15),
                             value: searchManager.suggestions.count
@@ -322,6 +343,40 @@ struct CommandPaletteView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func presentationModeButton(
+        label: String,
+        symbol: String,
+        isActive: Bool,
+        toggle: @escaping () -> Void
+    ) -> some View {
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 10, weight: .semibold))
+                    .rotationEffect(.degrees(symbol == "option" ? 0 : 0))
+                    .opacity(0.7)
+                Text(label)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(isActive ? .white : .white.opacity(0.75))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isActive
+                        ? gradientColorManager.primaryColor.opacity(0.85)
+                        : Color.white.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(isActive ? 0.0 : 0.12), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("\(label) (toggle)")
     }
 
     private func isEmoji(_ string: String) -> Bool {
@@ -504,6 +559,25 @@ struct CommandPaletteView: View {
             selectedSuggestionIndex = min(selectedSuggestionIndex + 1, maxIndex)
         } else {
             selectedSuggestionIndex = max(selectedSuggestionIndex - 1, -1)
+        }
+
+        // Warm DNS / TCP / TLS for whatever the user is about to press Enter on.
+        // By the time they commit, the socket is usually already negotiated.
+        if selectedSuggestionIndex >= 0, selectedSuggestionIndex < visibleSuggestions.count {
+            preconnectSuggestion(visibleSuggestions[selectedSuggestionIndex])
+        }
+    }
+
+    private func preconnectSuggestion(_ suggestion: SearchManager.SearchSuggestion) {
+        switch suggestion.type {
+        case .history(let entry):
+            PreconnectManager.shared.preconnect(entry.url.absoluteString)
+        case .url:
+            PreconnectManager.shared.preconnect(suggestion.text)
+        case .tab, .search:
+            // .tab already has a webview (possibly live); .search resolves to
+            // the search engine URL only on commit, so preconnect happens there.
+            break
         }
     }
 

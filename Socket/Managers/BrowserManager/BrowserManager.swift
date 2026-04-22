@@ -380,6 +380,9 @@ class BrowserManager: ObservableObject {
     @Published var showTabClosureToast: Bool = false
     @Published var tabClosureToastCount: Int = 0
     @Published var updateAvailability: UpdateAvailability?
+    /// Last Sparkle-reported failure. Surfaced in Settings → General so the
+    /// user knows why a "Check for Updates" click didn't yield anything.
+    @Published var lastUpdateError: (message: String, at: Date)?
     @Published var isExtensionPopupActive: Bool = false
 
     /// Track tabs currently being synced to prevent recursive sync calls
@@ -3264,10 +3267,14 @@ extension BrowserManager {
 
     func handleUpdaterDidNotFindUpdate() {
         updateAvailability = nil
+        lastUpdateError = nil
     }
 
-    func handleUpdaterAbortedUpdate() {
+    func handleUpdaterAbortedUpdate(error: Error? = nil) {
         updateAvailability = nil
+        if let error {
+            lastUpdateError = (message: error.localizedDescription, at: Date())
+        }
     }
 
     func handleUpdaterWillInstallOnQuit(_ item: SUAppcastItem) {

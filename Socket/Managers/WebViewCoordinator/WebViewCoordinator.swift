@@ -99,11 +99,11 @@ class WebViewCoordinator {
     func getOrCreateWebView(for tab: Tab, in windowId: UUID, tabManager: TabManager) -> WKWebView {
         let tabId = tab.id
         
-        print("🔍 [MEMDEBUG] WebViewCoordinator.getOrCreateWebView() - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8))")
+        DLog("🔍 [MEMDEBUG] WebViewCoordinator.getOrCreateWebView() - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8))")
         
         // Check if this window already has a WebView for this tab
         if let existing = getWebView(for: tabId, in: windowId) {
-            print("🔍 [MEMDEBUG]   -> Returning EXISTING WebView for this window: \(Unmanaged.passUnretained(existing).toOpaque())")
+            DLog("🔍 [MEMDEBUG]   -> Returning EXISTING WebView for this window: \(Unmanaged.passUnretained(existing).toOpaque())")
             return existing
         }
         
@@ -111,12 +111,12 @@ class WebViewCoordinator {
         let allWindowsForTab = webViewsByTabAndWindow[tabId] ?? [:]
         let otherWindows = allWindowsForTab.filter { $0.key != windowId }
         
-        print("🔍 [MEMDEBUG]   Tab currently displayed in \(allWindowsForTab.count) window(s), other windows: \(otherWindows.count)")
+        DLog("🔍 [MEMDEBUG]   Tab currently displayed in \(allWindowsForTab.count) window(s), other windows: \(otherWindows.count)")
         
         if otherWindows.isEmpty {
             // This is the FIRST window to display this tab
             // Create the "primary" WebView and assign it to this tab
-            print("🔍 [MEMDEBUG]   -> No other windows, creating PRIMARY WebView")
+            DLog("🔍 [MEMDEBUG]   -> No other windows, creating PRIMARY WebView")
             let primaryWebView = createPrimaryWebView(for: tab, in: windowId)
             
             // Assign this WebView as the tab's primary
@@ -126,7 +126,7 @@ class WebViewCoordinator {
         } else {
             // Another window is already displaying this tab
             // Create a "clone" WebView for this window
-            print("🔍 [MEMDEBUG]   -> Other window(s) exist, creating CLONE WebView")
+            DLog("🔍 [MEMDEBUG]   -> Other window(s) exist, creating CLONE WebView")
             let cloneWebView = createCloneWebView(for: tab, in: windowId, primaryWindowId: otherWindows.first!.key)
             
             return cloneWebView
@@ -138,12 +138,12 @@ class WebViewCoordinator {
     private func createPrimaryWebView(for tab: Tab, in windowId: UUID) -> WKWebView {
         let tabId = tab.id
         
-        print("🔍 [MEMDEBUG] Creating PRIMARY WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8))")
+        DLog("🔍 [MEMDEBUG] Creating PRIMARY WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8))")
         
         // Use the standard creation logic but mark it as primary
         let webView = createWebViewInternal(for: tab, in: windowId, isPrimary: true)
         
-        print("🔍 [MEMDEBUG]   -> Primary WebView created: \(Unmanaged.passUnretained(webView).toOpaque())")
+        DLog("🔍 [MEMDEBUG]   -> Primary WebView created: \(Unmanaged.passUnretained(webView).toOpaque())")
         return webView
     }
     
@@ -152,7 +152,7 @@ class WebViewCoordinator {
     private func createCloneWebView(for tab: Tab, in windowId: UUID, primaryWindowId: UUID) -> WKWebView {
         let tabId = tab.id
         
-        print("🔍 [MEMDEBUG] Creating CLONE WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), PrimaryWindow: \(primaryWindowId.uuidString.prefix(8))")
+        DLog("🔍 [MEMDEBUG] Creating CLONE WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), PrimaryWindow: \(primaryWindowId.uuidString.prefix(8))")
         
         // Get the primary WebView to copy configuration
         let primaryWebView = getWebView(for: tabId, in: primaryWindowId)
@@ -160,7 +160,7 @@ class WebViewCoordinator {
         // Create clone with shared configuration
         let webView = createWebViewInternal(for: tab, in: windowId, isPrimary: false, copyFrom: primaryWebView)
         
-        print("🔍 [MEMDEBUG]   -> Clone WebView created: \(Unmanaged.passUnretained(webView).toOpaque())")
+        DLog("🔍 [MEMDEBUG]   -> Clone WebView created: \(Unmanaged.passUnretained(webView).toOpaque())")
         return webView
     }
     
@@ -199,20 +199,7 @@ class WebViewCoordinator {
         newWebView.owningTab = tab
         newWebView.contextMenuBridge = WebContextMenuBridge(tab: tab, configuration: configuration)
         
-        newWebView.configuration.userContentController.add(tab, name: "linkHover")
-        newWebView.configuration.userContentController.add(tab, name: "commandHover")
-        newWebView.configuration.userContentController.add(tab, name: "commandClick")
-        newWebView.configuration.userContentController.add(tab, name: "pipStateChange")
-        newWebView.configuration.userContentController.add(tab, name: "mediaStateChange_\(tabId.uuidString)")
-        newWebView.configuration.userContentController.add(tab, name: "backgroundColor_\(tabId.uuidString)")
-        newWebView.configuration.userContentController.add(tab, name: "historyStateDidChange")
-        newWebView.configuration.userContentController.add(tab, name: "SocketIdentity")
-        newWebView.configuration.userContentController.add(tab, name: "socketShortcutDetect")
-        newWebView.configuration.userContentController.add(tab, name: "passwordFormDetected")
-        newWebView.configuration.userContentController.add(tab, name: "passwordFormSubmitted")
-        newWebView.configuration.userContentController.addScriptMessageHandler(
-            tab, contentWorld: .page, name: "passwordAutofillRequest"
-        )
+        SocketMessageHandlers.register(on: newWebView, for: tab)
         newWebView.configuration.userContentController.addUserScript(
             WKUserScript(
                 source: WebsiteShortcutDetector.jsDetectionScript,
@@ -225,26 +212,26 @@ class WebViewCoordinator {
             newWebView,
             for: tab
         )
-        
+
         tab.setupThemeColorObserver(for: newWebView)
-        
+
         // Only load URL if this is the primary or if we're creating a clone
         // For clones, we sync the URL via syncTab later
         if let url = URL(string: tab.url.absoluteString) {
             newWebView.load(URLRequest(url: url))
         }
         newWebView.isMuted = tab.isAudioMuted
-        
+
         setWebView(newWebView, for: tabId, in: windowId)
-        
+
         let typeStr = isPrimary ? "PRIMARY" : "CLONE"
-        print("🔍 [MEMDEBUG] WebViewCoordinator CREATED \(typeStr) WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), DataStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
+        DLog("🔍 [MEMDEBUG] WebViewCoordinator CREATED \(typeStr) WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), DataStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
         
         // Log all WebViews now tracked for this tab
         let allWebViewsForTab = getAllWebViews(for: tabId)
-        print("🔍 [MEMDEBUG]   Total WebViews for tab \(tabId.uuidString.prefix(8)): \(allWebViewsForTab.count)")
+        DLog("🔍 [MEMDEBUG]   Total WebViews for tab \(tabId.uuidString.prefix(8)): \(allWebViewsForTab.count)")
         for (index, wv) in allWebViewsForTab.enumerated() {
-            print("🔍 [MEMDEBUG]     [\(index)] WebView: \(Unmanaged.passUnretained(wv).toOpaque())")
+            DLog("🔍 [MEMDEBUG]     [\(index)] WebView: \(Unmanaged.passUnretained(wv).toOpaque())")
         }
         
         return newWebView
@@ -340,10 +327,10 @@ class WebViewCoordinator {
     func createWebView(for tab: Tab, in windowId: UUID) -> WKWebView {
         let tabId = tab.id
         
-        print("🔍 [MEMDEBUG] WebViewCoordinator.createWebView() START - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), TabName: \(tab.name)")
-        print("🔍 [MEMDEBUG]   tab.existingWebView exists: \(tab.existingWebView != nil), tab.webView exists: \(tab.webView != nil)")
+        DLog("🔍 [MEMDEBUG] WebViewCoordinator.createWebView() START - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), TabName: \(tab.name)")
+        DLog("🔍 [MEMDEBUG]   tab.existingWebView exists: \(tab.existingWebView != nil), tab.webView exists: \(tab.webView != nil)")
         if let tabWebView = tab.existingWebView {
-            print("🔍 [MEMDEBUG]   Tab's existingWebView: \(Unmanaged.passUnretained(tabWebView).toOpaque())")
+            DLog("🔍 [MEMDEBUG]   Tab's existingWebView: \(Unmanaged.passUnretained(tabWebView).toOpaque())")
         }
 
         // Derive config from shared config or existing webview to preserve
@@ -371,19 +358,7 @@ class WebViewCoordinator {
         newWebView.owningTab = tab
         newWebView.contextMenuBridge = WebContextMenuBridge(tab: tab, configuration: configuration)
 
-        newWebView.configuration.userContentController.add(tab, name: "linkHover")
-        newWebView.configuration.userContentController.add(tab, name: "commandHover")
-        newWebView.configuration.userContentController.add(tab, name: "commandClick")
-        newWebView.configuration.userContentController.add(tab, name: "pipStateChange")
-        newWebView.configuration.userContentController.add(tab, name: "mediaStateChange_\(tabId.uuidString)")
-        newWebView.configuration.userContentController.add(tab, name: "backgroundColor_\(tabId.uuidString)")
-        newWebView.configuration.userContentController.add(tab, name: "historyStateDidChange")
-        newWebView.configuration.userContentController.add(tab, name: "SocketIdentity")
-        newWebView.configuration.userContentController.add(tab, name: "passwordFormDetected")
-        newWebView.configuration.userContentController.add(tab, name: "passwordFormSubmitted")
-        newWebView.configuration.userContentController.addScriptMessageHandler(
-            tab, contentWorld: .page, name: "passwordAutofillRequest"
-        )
+        SocketMessageHandlers.register(on: newWebView, for: tab)
         tab.browserManager?.trackingProtectionManager.configureNewWebView(
             newWebView,
             for: tab
@@ -398,13 +373,13 @@ class WebViewCoordinator {
 
         setWebView(newWebView, for: tabId, in: windowId)
 
-        print("🔍 [MEMDEBUG] WebViewCoordinator CREATED WINDOW-SPECIFIC WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), DataStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
+        DLog("🔍 [MEMDEBUG] WebViewCoordinator CREATED WINDOW-SPECIFIC WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), DataStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
         
         // Log all WebViews now tracked for this tab
         let allWebViewsForTab = getAllWebViews(for: tabId)
-        print("🔍 [MEMDEBUG]   Total WebViews for tab \(tabId.uuidString.prefix(8)): \(allWebViewsForTab.count)")
+        DLog("🔍 [MEMDEBUG]   Total WebViews for tab \(tabId.uuidString.prefix(8)): \(allWebViewsForTab.count)")
         for (index, wv) in allWebViewsForTab.enumerated() {
-            print("🔍 [MEMDEBUG]     [\(index)] WebView: \(Unmanaged.passUnretained(wv).toOpaque())")
+            DLog("🔍 [MEMDEBUG]     [\(index)] WebView: \(Unmanaged.passUnretained(wv).toOpaque())")
         }
         
         return newWebView
@@ -418,26 +393,12 @@ class WebViewCoordinator {
         // Stop loading
         webView.stopLoading()
 
-        // Remove all message handlers
-        let controller = webView.configuration.userContentController
-        let allMessageHandlers = [
-            "linkHover",
-            "commandHover",
-            "commandClick",
-            "pipStateChange",
-            "mediaStateChange_\(tabId.uuidString)",
-            "backgroundColor_\(tabId.uuidString)",
-            "historyStateDidChange",
-            "SocketIdentity",
-            "socketShortcutDetect",
-            "passwordFormDetected",
-            "passwordFormSubmitted",
-            "passwordAutofillRequest",
-        ]
-
-        for handlerName in allMessageHandlers {
-            controller.removeScriptMessageHandler(forName: handlerName)
-        }
+        // Remove all canonical Socket handlers + the Web-Store handler
+        // (separate target). The tabId-parameterised handler names stay in sync
+        // via SocketMessageHandlers.
+        SocketMessageHandlers.remove(from: webView, tabId: tabId)
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: "socketWebStore")
 
         // MEMORY LEAK FIX: Detach contextMenuBridge
         if let focusableWebView = webView as? FocusableWKWebView {

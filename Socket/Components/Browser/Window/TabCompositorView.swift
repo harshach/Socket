@@ -5,7 +5,14 @@ import WebKit
 struct TabCompositorView: NSViewRepresentable {
     let browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
-    
+
+    final class Coordinator {
+        var installedTabId: UUID?
+        weak var installedWebView: WKWebView?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         view.wantsLayer = true
@@ -15,47 +22,76 @@ struct TabCompositorView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        // Update the compositor when tabs change or compositor version changes
+        // Appearance flips are cheap; always reapply so light/dark sync stays correct.
         nsView.appearance = systemContentAppearance()
-        updateCompositor(nsView)
+        updateCompositor(nsView, coordinator: context.coordinator)
     }
 
-    private func updateCompositor(_ containerView: NSView) {
-        // Remove all existing webview subviews
-        containerView.subviews.forEach { $0.removeFromSuperview() }
-
-        // Only add the current tab's webView to avoid WKWebView conflicts
+    private func updateCompositor(_ containerView: NSView, coordinator: Coordinator) {
+        // Resolve the target tab + webview. If there's nothing to show, detach
+        // whatever is currently installed and stop.
         guard let currentTabId = windowState.currentTabId,
               let currentTab = browserManager.tabsForDisplay(in: windowState).first(where: { $0.id == currentTabId }),
               !currentTab.isUnloaded else {
+            if let installed = coordinator.installedWebView {
+                installed.removeFromSuperview()
+            }
+            coordinator.installedTabId = nil
+            coordinator.installedWebView = nil
             return
         }
 
-        // Create a window-specific web view for this tab
-        let webView = getOrCreateWebView(for: currentTab, in: windowState.id)
-        webView.frame = containerView.bounds
-        webView.autoresizingMask = [.width, .height]
+        let targetWebView = getOrCreateWebView(for: currentTab, in: windowState.id)
+
+        // Fast path: the exact same webview is already mounted for the right tab.
+        // `updateNSView` fires on any BrowserWindowState change (sidebar toggle,
+        // toolbar click, profile tick, etc.) — tearing the webview out of the view
+        // hierarchy every time forces AppKit to re-layout and WebKit to re-sync
+        // its compositing surfaces. Skip the churn unless something actually moved.
+        if coordinator.installedTabId == currentTabId,
+           coordinator.installedWebView === targetWebView,
+           targetWebView.superview === containerView {
+            // Keep frame / appearance in sync in case the container resized.
+            if targetWebView.frame != containerView.bounds {
+                targetWebView.frame = containerView.bounds
+            }
+            targetWebView.appearance = systemContentAppearance()
+            return
+        }
+
+        // Different tab or different webview instance: swap.
+        if let installed = coordinator.installedWebView, installed !== targetWebView {
+            installed.removeFromSuperview()
+        }
+
+        targetWebView.frame = containerView.bounds
+        targetWebView.autoresizingMask = [.width, .height]
         // Window-level preferredColorScheme (driven by sidebar gradient) forces
         // NSAppearance.darkAqua on windows with dark-perceived gradients. That
         // bleeds into WebKit's native form controls (checkboxes, radios) so they
         // render dark-mode on light pages — e.g. GitHub checkboxes as black
         // squares. Pin the webview to the *system* appearance instead.
-        webView.appearance = systemContentAppearance()
-        containerView.addSubview(webView)
-        webView.isHidden = false
+        targetWebView.appearance = systemContentAppearance()
+        if targetWebView.superview !== containerView {
+            containerView.addSubview(targetWebView)
+        }
+        targetWebView.isHidden = false
+
+        coordinator.installedTabId = currentTabId
+        coordinator.installedWebView = targetWebView
     }
 
     private func systemContentAppearance() -> NSAppearance? {
         let isDark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
         return NSAppearance(named: isDark ? .darkAqua : .aqua)
     }
-    
+
     private func getOrCreateWebView(for tab: Tab, in windowId: UUID) -> WKWebView {
         // Check if we already have a web view for this tab in this window
         if let existingWebView = browserManager.getWebView(for: tab.id, in: windowId) {
             return existingWebView
         }
-        
+
         // Create a new web view for this tab in this window
         return browserManager.createWebView(for: tab.id, in: windowId)
     }
@@ -153,23 +189,29 @@ class TabCompositorManager: ObservableObject {
     
     private func handleTabTimeout(_ tabId: UUID) {
         guard let tab = findTab(by: tabId) else { return }
-        
+
+        #if DEBUG
+        // Skip auto-unload in Debug builds. It nukes logged-in sessions during
+        // local development (every Gmail/GitHub tab goes back to login), and
+        // we restart the app often enough that memory pressure isn't a concern.
+        // Production builds still unload idle tabs after the normal timeout.
+        restartTimer(for: tabId)
+        return
+        #else
         // Don't unload if it's the current tab
         if tab.id == tabId && tab.isCurrentTab {
-            // Restart timer for current tab
             restartTimer(for: tabId)
             return
         }
-        
+
         // Don't unload if tab has playing media
         if tab.hasPlayingVideo || tab.hasPlayingAudio || tab.hasAudioContent {
-            // Restart timer for tabs with media
             restartTimer(for: tabId)
             return
         }
-        
-        // Unload the tab
+
         unloadTab(tab)
+        #endif
     }
     
     private func findTab(by id: UUID) -> Tab? {

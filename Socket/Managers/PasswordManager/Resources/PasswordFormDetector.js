@@ -387,19 +387,29 @@
     // via `currentColor` so it reads on both light and dark page backgrounds.
     var ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="10" r="3"/><path d="M9 10h9"/><path d="M15 10v2.6"/><path d="M17.6 10v3.2"/></svg>';
 
-    // Attach an inline key icon to an input field. Pass the username input
-    // when one exists (users look there first, matching Brave / Arc / 1Password
-    // extension behavior). Fall back to the password field only when no
-    // username is detected.
-    function ensureInlineIcon(inputEl) {
-        if (inputEl.__socketIconInstalled) { return; }
-        inputEl.__socketIconInstalled = true;
-        if (inputEl.ownerDocument !== document) { return; } // shadow/other
+    // Shared icon element — one per page, not per field. Previously we attached
+    // an icon + ResizeObserver + global scroll listener (capture) + window.resize
+    // listener + per-field MutationObserver to every detected username/password
+    // input. On form-heavy pages (signup flows, spreadsheets) that compounded
+    // badly. Now we show a single shared icon anchored to whichever matching
+    // input currently has focus, and position-track only while focused via rAF.
+    var sharedIcon = null;
+    var activeIconInput = null;
+    var iconRafHandle = 0;
 
+    function markIconEligible(inputEl) {
+        if (inputEl && inputEl.ownerDocument === document) {
+            inputEl.__socketIconEligible = true;
+        }
+    }
+
+    function buildSharedIcon() {
+        if (sharedIcon) { return sharedIcon; }
         var icon = document.createElement("div");
         icon.setAttribute("data-socket-autofill-icon", "1");
         icon.setAttribute("aria-hidden", "true");
         icon.style.cssText = ICON_STYLE;
+        icon.style.display = "none";
         icon.innerHTML = ICON_SVG;
         icon.title = "Fill from Socket";
 
@@ -410,7 +420,8 @@
         icon.addEventListener("click", function (e) {
             e.preventDefault();
             e.stopPropagation();
-            var info = describeFieldsForInput(inputEl);
+            if (!activeIconInput) { return; }
+            var info = describeFieldsForInput(activeIconInput);
             if (info) { requestAutofill(info, "icon"); }
         }, true);
         icon.addEventListener("mouseenter", function () {
@@ -422,54 +433,71 @@
             icon.style.boxShadow = "0 0 0 1px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05)";
         });
 
-        document.body.appendChild(icon);
+        (document.body || document.documentElement).appendChild(icon);
+        sharedIcon = icon;
+        return icon;
+    }
 
-        // Password fields often have a site-rendered show/hide eye icon at the
-        // far right — reserve room for it. Username fields almost never do,
-        // so we can park ours closer to the edge.
-        var isPassword = inputEl.matches && inputEl.matches("input[type=password]");
-        var gutterRight = isPassword ? 36 : 6;
-
-        function updatePosition() {
-            var rect = inputEl.getBoundingClientRect();
-            // Hide when the field is detached, invisible, or too small
-            // to accommodate the icon without clobbering the text.
-            if (rect.width < 80 || rect.height < 18) {
-                icon.style.display = "none";
-                return;
-            }
+    function positionIconForActive() {
+        iconRafHandle = 0;
+        var input = activeIconInput;
+        var icon = sharedIcon;
+        if (!input || !icon) { return; }
+        if (!document.contains(input)) {
+            hideSharedIcon();
+            return;
+        }
+        var rect = input.getBoundingClientRect();
+        if (rect.width < 80 || rect.height < 18) {
+            icon.style.display = "none";
+        } else {
+            var isPassword = input.matches && input.matches("input[type=password]");
+            var gutterRight = isPassword ? 36 : 6;
             icon.style.display = "flex";
             icon.style.left = (rect.right - 22 - gutterRight) + "px";
             icon.style.top = (rect.top + (rect.height - 22) / 2) + "px";
         }
-        updatePosition();
-
-        var ro = null;
-        try {
-            ro = new ResizeObserver(updatePosition);
-            ro.observe(inputEl);
-        } catch (_) { /* Safari < 13.1 */ }
-
-        window.addEventListener("scroll", updatePosition, true);
-        window.addEventListener("resize", updatePosition);
-
-        // Detach when the input leaves the document. Re-check on DOM mutations.
-        var detachObserver = new MutationObserver(function () {
-            if (!document.contains(inputEl)) {
-                icon.remove();
-                if (ro) { ro.disconnect(); }
-                window.removeEventListener("scroll", updatePosition, true);
-                window.removeEventListener("resize", updatePosition);
-                detachObserver.disconnect();
-                inputEl.__socketIconInstalled = false;
-            } else {
-                updatePosition();
-            }
-        });
-        detachObserver.observe(document.documentElement || document, {
-            childList: true, subtree: true
-        });
+        // Keep tracking the rect on every frame *only* while this input remains
+        // the active focus target. Scroll / resize / layout changes are picked
+        // up implicitly without global listeners.
+        if (document.activeElement === input) {
+            iconRafHandle = requestAnimationFrame(positionIconForActive);
+        }
     }
+
+    function showIconFor(inputEl) {
+        if (!inputEl || !inputEl.__socketIconEligible) { return; }
+        var icon = buildSharedIcon();
+        activeIconInput = inputEl;
+        if (iconRafHandle) { cancelAnimationFrame(iconRafHandle); iconRafHandle = 0; }
+        // Kick off rAF loop; first frame positions + draws.
+        iconRafHandle = requestAnimationFrame(positionIconForActive);
+        // Immediate first-frame position so there's no flash.
+        icon.style.visibility = "visible";
+    }
+
+    function hideSharedIcon() {
+        if (iconRafHandle) { cancelAnimationFrame(iconRafHandle); iconRafHandle = 0; }
+        activeIconInput = null;
+        if (sharedIcon) { sharedIcon.style.display = "none"; }
+    }
+
+    document.addEventListener("focusin", function (e) {
+        var target = e.target;
+        if (target && target.__socketIconEligible) {
+            showIconFor(target);
+        }
+    }, true);
+
+    document.addEventListener("focusout", function (e) {
+        // Delay so a click on the icon itself (which focuses body) doesn't
+        // race us into hiding before the click handler runs.
+        setTimeout(function () {
+            if (document.activeElement !== activeIconInput) {
+                hideSharedIcon();
+            }
+        }, 50);
+    }, true);
 
     // ----- Wire + observe -----
 
@@ -488,10 +516,12 @@
             var user = findUsernameInput(pwFields[i]);
             if (user) { ensureFid(user, USERNAME_ATTR); }
             if (isTopFrame) {
-                // Prefer the username field as the icon's host — that's what
-                // users focus first and matches the Brave / 1Password pattern.
+                // Prefer the username field as the icon host — that's what
+                // users focus first, matching the Brave / 1Password pattern.
                 // Fall back to the password field for "just password" forms.
-                ensureInlineIcon(user || pwFields[i]);
+                // Marking is O(1); the shared icon only materialises + repositions
+                // when one of these inputs actually receives focus.
+                markIconEligible(user || pwFields[i]);
             }
         }
     }

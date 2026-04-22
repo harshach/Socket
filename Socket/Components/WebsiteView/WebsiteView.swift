@@ -576,21 +576,21 @@ struct TabCompositorWrapper: NSViewRepresentable {
     }
 
     private func updateCompositor(_ containerView: NSView) {
-        print("🔍 [MEMDEBUG] updateCompositor() CALLED - Window: \(windowState.id.uuidString.prefix(8)), Size: \(containerView.bounds.size)")
+        DLog("🔍 [MEMDEBUG] updateCompositor() CALLED - Window: \(windowState.id.uuidString.prefix(8)), Size: \(containerView.bounds.size)")
         
         // Remove all existing webview subviews
         // Preserve the last overlay subview if present, then re-add
         let overlay = containerView.subviews.compactMap { $0 as? SplitDropCaptureView }.first
         let existingSubviews = containerView.subviews.count
-        print("🔍 [MEMDEBUG]   Removing \(existingSubviews) existing subviews")
+        DLog("🔍 [MEMDEBUG]   Removing \(existingSubviews) existing subviews")
         containerView.subviews.forEach { $0.removeFromSuperview() }
         
         // Add tabs that should be displayed in this window. If split view is active, show two panes;
         // otherwise show only the current tab.
         let allTabs = browserManager.tabsForDisplay(in: windowState)
-        print("🔍 [MEMDEBUG]   Processing \(allTabs.count) tabs for display")
+        DLog("🔍 [MEMDEBUG]   Processing \(allTabs.count) tabs for display")
         for tab in allTabs {
-            print("🔍 [MEMDEBUG]     Tab: \(tab.id.uuidString.prefix(8)), Name: \(tab.name), isUnloaded: \(tab.isUnloaded)")
+            DLog("🔍 [MEMDEBUG]     Tab: \(tab.id.uuidString.prefix(8)), Name: \(tab.name), isUnloaded: \(tab.isUnloaded)")
         }
         
         let split = browserManager.splitManager
@@ -712,7 +712,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
         // Log final state
         let webViewCount = containerView.subviews.filter { $0 is WKWebView }.count
         let totalSubviews = containerView.subviews.count
-        print("🔍 [MEMDEBUG] updateCompositor() COMPLETE - Window: \(windowState.id.uuidString.prefix(8)), WebViews in container: \(webViewCount), Total subviews: \(totalSubviews)")
+        DLog("🔍 [MEMDEBUG] updateCompositor() COMPLETE - Window: \(windowState.id.uuidString.prefix(8)), WebViews in container: \(webViewCount), Total subviews: \(totalSubviews)")
     }
 
     private func makePaneContainer(frame: NSRect, isActive: Bool, accent: NSColor, side: SplitViewManager.Side) -> NSView {
@@ -818,14 +818,14 @@ struct TabCompositorWrapper: NSViewRepresentable {
     }
 
     private func webView(for tab: Tab, windowId: UUID) -> WKWebView {
-        print("🔍 [MEMDEBUG] WebsiteView.webView() REQUESTED - Tab: \(tab.id.uuidString.prefix(8)), Name: \(tab.name), Window: \(windowId.uuidString.prefix(8))")
-        print("🔍 [MEMDEBUG]   tab.isUnloaded: \(tab.isUnloaded), tab.assignedWebView exists: \(tab.assignedWebView != nil), primaryWindowId: \(tab.primaryWindowId?.uuidString.prefix(8) ?? "nil")")
+        DLog("🔍 [MEMDEBUG] WebsiteView.webView() REQUESTED - Tab: \(tab.id.uuidString.prefix(8)), Name: \(tab.name), Window: \(windowId.uuidString.prefix(8))")
+        DLog("🔍 [MEMDEBUG]   tab.isUnloaded: \(tab.isUnloaded), tab.assignedWebView exists: \(tab.assignedWebView != nil), primaryWindowId: \(tab.primaryWindowId?.uuidString.prefix(8) ?? "nil")")
         
         // Use the new smart WebView assignment system
         // This ensures only ONE WebView per tab in single-window mode
         if let coordinator = browserManager.webViewCoordinator {
             let webView = coordinator.getOrCreateWebView(for: tab, in: windowId, tabManager: browserManager.tabManager)
-            print("🔍 [MEMDEBUG]   -> Got WebView via smart assignment: \(Unmanaged.passUnretained(webView).toOpaque())")
+            DLog("🔍 [MEMDEBUG]   -> Got WebView via smart assignment: \(Unmanaged.passUnretained(webView).toOpaque())")
             return webView
         }
         

@@ -238,8 +238,35 @@ class HistoryManager {
     
     // MARK: - Private Methods
     
+    /// Hard cap on total stored entries across all profiles. Belt-and-suspenders
+    /// on top of the age-based prune — protects against a rogue SPA that
+    /// synthesises thousands of nav entries in a short window.
+    private let maxHistoryEntries: Int = 50_000
+
     private func cleanupOldHistory() async {
         clearHistory(olderThan: maxHistoryDays)
+        trimToRowCap()
+    }
+
+    /// If the history table has grown past maxHistoryEntries, delete the
+    /// oldest rows (by visitDate ascending) until we're back under the cap.
+    private func trimToRowCap() {
+        do {
+            var descriptor = FetchDescriptor<HistoryEntity>(
+                sortBy: [SortDescriptor(\.visitDate, order: .forward)]
+            )
+            descriptor.fetchLimit = 0
+            let total = try context.fetchCount(descriptor)
+            guard total > maxHistoryEntries else { return }
+            let excess = total - maxHistoryEntries
+            descriptor.fetchLimit = excess
+            let victims = try context.fetch(descriptor)
+            for v in victims { context.delete(v) }
+            try context.save()
+            print("Trimmed \(victims.count) history entries to enforce row cap of \(maxHistoryEntries)")
+        } catch {
+            print("Error enforcing history row cap: \(error)")
+        }
     }
 
     // MARK: - Stats
