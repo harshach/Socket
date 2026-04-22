@@ -383,6 +383,20 @@ extension AppDelegate {
     /// Called when update process encounters an error
     func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
         let ns = error as NSError
+        // Sparkle fires didAbortWithError for the "user clicked Check,
+        // nothing newer in the feed" case too. Codes 1001 (SUNoUpdateError)
+        // and 4005 (cancelled by user) aren't real failures — surface them
+        // as "no update" instead of "last check failed".
+        let isNoUpdateSignal = ns.domain == "SUSparkleErrorDomain" && (ns.code == 1001 || ns.code == 4005)
+        if isNoUpdateSignal {
+            Self.log.info(
+                "Sparkle: no update available (\(ns.localizedDescription, privacy: .public))"
+            )
+            Task { @MainActor in
+                self.browserManager?.handleUpdaterDidNotFindUpdate()
+            }
+            return
+        }
         Self.log.error(
             "Sparkle update aborted: \(ns.localizedDescription, privacy: .public) (domain=\(ns.domain, privacy: .public) code=\(ns.code))"
         )

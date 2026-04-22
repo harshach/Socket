@@ -156,14 +156,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Use an isolated worktree so main's working tree stays untouched.
+          # Previously `git checkout gh-pages` in-place failed whenever the
+          # build step left tracked files dirty (e.g. add-test-target.rb
+          # touching Socket.xcodeproj/project.pbxproj), aborting the appcast
+          # update entirely and leaving releases unlinked.
+          WORKTREE=/tmp/gh-pages
+          rm -rf "$WORKTREE"
+
           if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
-            git fetch origin gh-pages
-            git checkout gh-pages
+            git fetch origin gh-pages:gh-pages || git fetch origin gh-pages
+            git worktree add "$WORKTREE" gh-pages
           else
             echo "Bootstrapping gh-pages branch…"
-            git checkout --orphan gh-pages
-            git rm -rf . >/dev/null 2>&1 || true
+            git worktree add --orphan -b gh-pages "$WORKTREE"
+            rm -rf "$WORKTREE"/* "$WORKTREE"/.[!.]*  2>/dev/null || true
           fi
+
+          cd "$WORKTREE"
 
           for f in appcast.xml appcast-nightly.xml index.html README.md install.sh; do
             if [ ! -f "$f" ]; then
