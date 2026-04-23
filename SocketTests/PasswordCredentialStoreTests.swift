@@ -86,6 +86,30 @@ final class PasswordCredentialStoreTests: XCTestCase {
                 execute these tests.
                 """)
         }
+
+        // macOS CI runners (unsigned, no keychain-access-groups entitlement)
+        // can succeed with kSecMatchLimitOne but silently return zero matches
+        // for kSecMatchLimitAll — which is what the real fetchAll uses. Without
+        // this extra probe, the test proceeds and fetchAll() finds nothing,
+        // failing assertions rather than skipping. Verify the multi-match
+        // query path here too.
+        var items: CFTypeRef?
+        let findAllStatus = SecItemCopyMatching([
+            kSecClass as String: kSecClassInternetPassword,
+            kSecAttrService as String: probeService,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+            kSecReturnPersistentRef as String: true
+        ] as CFDictionary, &items)
+        let multiCount = (items as? [[String: Any]])?.count ?? 0
+        if findAllStatus != errSecSuccess || multiCount == 0 {
+            throw XCTSkip("""
+                Keychain kSecMatchLimitAll lookup returned \(multiCount) items \
+                (OSStatus \(findAllStatus)) — typical for unsigned CI hosts on \
+                macOS 15+. Run these tests signed (Xcode, or CI with a \
+                keychain-access-groups entitlement).
+                """)
+        }
     }
 
     // MARK: - Save / fetch

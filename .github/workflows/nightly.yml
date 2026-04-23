@@ -80,6 +80,45 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER=""
           cp -R "build/Build/Products/Release/Socket.app" ./Socket.app
 
+      - name: Re-sign with launch-compatible entitlements
+        run: |
+          set -e
+          # xcodebuild applies the full Socket.entitlements (including
+          # com.apple.developer.{aps-environment, authentication-services.*,
+          # web-browser.public-key-credential}) — all of which require a
+          # Developer Team. Under ad-hoc signing, AMFI rejects those at launch
+          # with POSIX 163 "Launchd job spawn failed" → Finder shows
+          # "The application Socket can't be opened." Strip the keys and
+          # re-sign. `com.apple.security.cs.disable-library-validation` is
+          # needed because --options runtime (hardened runtime) otherwise
+          # rejects nested ad-hoc-signed dylibs as mismatched-team.
+          APP="Socket.app"
+          ENT_SRC="Socket/Socket.entitlements"
+          ENT_TMP=$(mktemp)
+          plutil -convert xml1 -o "$ENT_TMP" "$ENT_SRC"
+          for key in \
+            com.apple.developer.aps-environment \
+            com.apple.developer.authentication-services.autofill-credential-provider \
+            com.apple.developer.web-browser.public-key-credential; do
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$ENT_TMP" 2>/dev/null || true
+          done
+          /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ENT_TMP" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Set :com.apple.security.cs.disable-library-validation true" "$ENT_TMP"
+
+          # Sign nested binaries inside-out first, then the outer app.
+          while IFS= read -r -d '' nested; do
+            codesign --force --sign - --timestamp=none "$nested" 2>/dev/null || true
+          done < <(find "$APP" \
+            \( -name "*.dylib" -o -name "*.framework" -o -name "*.xpc" -o -name "*.bundle" -o -name "*.app" \) \
+            ! -path "$APP" \
+            -print0)
+
+          codesign --force --sign - --entitlements "$ENT_TMP" "$APP"
+          rm -f "$ENT_TMP"
+
+          # Sanity-check: the bundle should now be launch-legal under ad-hoc.
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Identifier|Signature|flags" || true
+
       - name: Create DMG
         run: |
           hdiutil create -volname "Socket Nightly ${SHORT_VERSION}" \
