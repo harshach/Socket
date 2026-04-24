@@ -5,6 +5,17 @@
     <description>Automated nightly builds from the main branch. Expect regressions.</description>
     <language>en</language>
     <item>
+      <title>Nightly 1.1.0-nightly.20260424.25+651a0e9</title>
+      <pubDate>Fri, 24 Apr 2026 19:31:21 +0000</pubDate>
+      <enclosure
+        url="https://github.com/harshach/Socket/releases/download/nightly-20260424-25/Socket-nightly-20260424-25.dmg"
+        sparkle:version="25"
+        sparkle:shortVersionString="1.1.0-nightly.20260424.25+651a0e9"
+        sparkle:edSignature="xRy9AMcn072pRfmggf7Ay82C8WKU53eecLS/YG0Ov3N6gkCUGW6IUFPE96PnFeV9Hz2dAfLEX1syovq0q+TGDA=="
+        length="21742844"
+        type="application/octet-stream"/>
+    </item>
+    <item>
       <title>Nightly 1.1.0-nightly.20260423.23+bc407e3</title>
       <pubDate>Thu, 23 Apr 2026 03:50:08 +0000</pubDate>
       <enclosure
