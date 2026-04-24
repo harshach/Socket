@@ -104,7 +104,13 @@ final class PasswordCredentialStore {
 
         var insert: [String: Any] = base
         insert[kSecValueData as String] = passwordData
-        insert[kSecAttrSynchronizable as String] = sync ? kCFBooleanTrue : kCFBooleanFalse
+        // Only set kSecAttrSynchronizable when we *want* sync. Setting it to
+        // kCFBooleanFalse explicitly on macOS 15+ Keychain returns
+        // errSecNoSuchAttr (-25303) on SecItemAdd — the OS treats "not set"
+        // as the non-sync default and rejects an explicit-false duplicate.
+        if sync {
+            insert[kSecAttrSynchronizable as String] = kCFBooleanTrue
+        }
         insert[kSecReturnPersistentRef as String] = true
         insert[kSecAttrLabel as String] = labelFor(host: host)
         // base[] already includes kSecUseDataProtectionKeychain keyed to the
@@ -117,10 +123,28 @@ final class PasswordCredentialStore {
             logger.error("SecItemAdd failed: \(status, privacy: .public)")
             return .failure(.unhandled(status))
         }
-        guard let ref = item as? Data else {
-            return .failure(.decodingFailed)
+        // Primary path: the SecItemAdd out-parameter carries the persistent
+        // ref as Data. Some macOS builds return a CFDictionary instead when
+        // the input dict mixed kSecReturnPersistentRef with other return
+        // specifiers, so handle both shapes plus a post-add fallback query.
+        if let ref = item as? Data {
+            return .success(ref)
         }
-        return .success(ref)
+        if let dict = item as? [String: Any],
+           let ref = dict[kSecValuePersistentRef as String] as? Data {
+            return .success(ref)
+        }
+        // Fallback: do a targeted query for the just-inserted record.
+        var lookup = base
+        lookup[kSecAttrAccount as String] = username
+        lookup[kSecReturnPersistentRef as String] = true
+        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+        var fetched: CFTypeRef?
+        let fetchStatus = SecItemCopyMatching(lookup as CFDictionary, &fetched)
+        if fetchStatus == errSecSuccess, let ref = fetched as? Data {
+            return .success(ref)
+        }
+        return .failure(.decodingFailed)
         #else
         return .failure(.unhandled(-1))
         #endif
