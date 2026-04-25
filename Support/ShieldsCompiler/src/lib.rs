@@ -17,11 +17,35 @@
 
 use adblock::content_blocking::{CbRule, CbType};
 use adblock::lists::{FilterFormat, FilterSet, ParseOptions};
+use adblock::resources::Resource;
+use adblock::Engine;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic;
+use std::sync::RwLock;
+
+/// Bundled at compile time from `resources/brave-resources.json` (sourced
+/// from https://github.com/brave/adblock-resources/raw/master/dist/resources.json).
+/// This is the scriptlet/redirect resource library adblock-rust looks up
+/// when filter rules reference `+js(name, ...)` injections — without it,
+/// every aggressive rule that depends on a scriptlet (e.g. YouTube
+/// unbreak) is silently dropped at compile time.
+const BUNDLED_RESOURCES_JSON: &str = include_str!("../resources/brave-resources.json");
+
+/// Hand-written MVP implementations of the most-referenced uBlock Origin
+/// scriptlets (aopr, set-constant, noeval, prevent-setTimeout, etc.).
+/// uBO ships them as ES modules we can't feed straight to adblock-rust —
+/// see `resources/build-ubo-resources.py` for the source + rationale.
+const BUNDLED_UBO_RESOURCES_JSON: &str = include_str!("../resources/ubo-resources.json");
+
+/// Process-global runtime adblock-rust [`Engine`]. Built by [`compile`]
+/// after a successful filter-list parse and queried by
+/// [`shields_query_cosmetic`] on every navigation. Held in a `RwLock`
+/// because callers from Swift may compile (write) concurrently with
+/// queries (read), though in practice compile happens infrequently.
+static RUNTIME_ENGINE: RwLock<Option<Engine>> = RwLock::new(None);
 
 // ===== Wire format =====
 
@@ -68,6 +92,12 @@ pub struct CompilerError {
 
 /// Run the adblock-rust pipeline. Takes a parsed [`CompilerInput`] and
 /// returns the compiled [`CompilerOutput`] or an error message.
+///
+/// Side effect: rebuilds the process-global runtime [`Engine`]
+/// (`RUNTIME_ENGINE`) so subsequent calls to [`shields_query_cosmetic`]
+/// reflect the new filter set. The runtime engine is what powers
+/// per-navigation scriptlet injection — without it, our content blocker
+/// silently drops every `+js(...)` rule the upstream lists ship.
 pub fn compile(input: CompilerInput) -> Result<CompilerOutput, Box<dyn Error>> {
     let mut filters = FilterSet::new(true);
     for subscription in input.subscriptions {
@@ -77,6 +107,11 @@ pub fn compile(input: CompilerInput) -> Result<CompilerOutput, Box<dyn Error>> {
         };
         filters.add_filter_list(&subscription.text, options);
     }
+
+    // Build the runtime engine BEFORE consuming the filter set. The
+    // content-blocking conversion below moves out of `filters`, so this
+    // ordering avoids a clone of the (potentially large) parsed lists.
+    install_runtime_engine(filters.clone());
 
     let (rules, _) = filters
         .into_content_blocking()
@@ -150,6 +185,87 @@ pub fn compile_json(input_json: &str) -> Result<String, Box<dyn Error>> {
     Ok(serde_json::to_string(&output)?)
 }
 
+/// Build the runtime [`Engine`] from `filters`, attach the bundled
+/// scriptlet/redirect resources, and stash it in `RUNTIME_ENGINE`.
+/// Failures are logged via the returned `error_json` path on the FFI
+/// surface; we don't want a bad resource bundle to fail the whole
+/// compile (the WKContentRuleList path still works).
+fn install_runtime_engine(filters: FilterSet) {
+    let mut engine = Engine::from_filter_set(filters, /* optimize= */ true);
+
+    // Load Brave's + uBO's scriptlet/redirect libraries so `+js(...)`
+    // rules in the upstream filter lists can resolve to actual JavaScript
+    // at query time. Bundled at compile time via `include_str!`. Brave's
+    // bundle ships YouTube unbreaks; the uBO MVP set covers aopr,
+    // set-constant, noeval, prevent-setTimeout/fetch/xhr — the patterns
+    // most commonly referenced by uBO Quick Fixes / Resource Abuse.
+    let mut resources = Vec::new();
+    if let Ok(brave) = serde_json::from_str::<Vec<Resource>>(BUNDLED_RESOURCES_JSON) {
+        resources.extend(brave);
+    }
+    if let Ok(ubo) = serde_json::from_str::<Vec<Resource>>(BUNDLED_UBO_RESOURCES_JSON) {
+        resources.extend(ubo);
+    }
+    if !resources.is_empty() {
+        engine.use_resources(resources);
+    }
+
+    if let Ok(mut slot) = RUNTIME_ENGINE.write() {
+        *slot = Some(engine);
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CosmeticQueryOutput {
+    /// `display: none !important` selectors. Page-side script should
+    /// inject these as a `<style>` element after the page DOM exists.
+    pub hide_selectors: Vec<String>,
+    /// JSON-encoded procedural filters (e.g. `:has-text(...)`) that
+    /// the page-side helper would interpret. Forwarded raw.
+    pub procedural_actions: Vec<String>,
+    /// Class/id selectors that should NOT have generic-page rules
+    /// applied (exception list).
+    pub exceptions: Vec<String>,
+    /// JavaScript scriptlet bundle to inject at documentStart. May be
+    /// empty for URLs with no `+js(...)` rules.
+    pub injected_script: String,
+    /// True when a `$generichide` exception applies — page should skip
+    /// the generic class/id selector pass.
+    pub generichide: bool,
+}
+
+/// Look up cosmetic + scriptlet resources for a URL against the current
+/// runtime engine. Returns an empty result (not an error) when the
+/// engine hasn't been built yet.
+pub fn query_cosmetic(url: &str) -> CosmeticQueryOutput {
+    let guard = match RUNTIME_ENGINE.read() {
+        Ok(g) => g,
+        Err(_) => return empty_cosmetic(),
+    };
+    let engine = match guard.as_ref() {
+        Some(e) => e,
+        None => return empty_cosmetic(),
+    };
+    let resources = engine.url_cosmetic_resources(url);
+    CosmeticQueryOutput {
+        hide_selectors: resources.hide_selectors.into_iter().collect(),
+        procedural_actions: resources.procedural_actions.into_iter().collect(),
+        exceptions: resources.exceptions.into_iter().collect(),
+        injected_script: resources.injected_script,
+        generichide: resources.generichide,
+    }
+}
+
+fn empty_cosmetic() -> CosmeticQueryOutput {
+    CosmeticQueryOutput {
+        hide_selectors: Vec::new(),
+        procedural_actions: Vec::new(),
+        exceptions: Vec::new(),
+        injected_script: String::new(),
+        generichide: false,
+    }
+}
+
 fn parse_format(value: &str) -> FilterFormat {
     match value {
         "hosts" => FilterFormat::Hosts,
@@ -215,6 +331,39 @@ pub unsafe extern "C" fn shields_free_string(ptr: *mut c_char) {
     }
     // Reconstruct the CString so Rust drops it properly.
     let _ = CString::from_raw(ptr);
+}
+
+/// Query the runtime engine for cosmetic + scriptlet resources matching
+/// `url`. Returns a JSON-encoded [`CosmeticQueryOutput`]. Empty result
+/// (all-empty fields) when the engine hasn't been built yet — callers
+/// should treat that as "no scriptlets to inject" rather than an error.
+///
+/// # Safety
+/// `url` must be a non-null, null-terminated UTF-8 C string. The
+/// returned pointer must be freed via [`shields_free_string`]. Never
+/// returns null except on `CString::new` failure (interior NUL — won't
+/// happen for our JSON output).
+#[no_mangle]
+pub unsafe extern "C" fn shields_query_cosmetic(url: *const c_char) -> *mut c_char {
+    let result = panic::catch_unwind(|| {
+        if url.is_null() {
+            return error_json("null url");
+        }
+        let c_str = CStr::from_ptr(url);
+        let url_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return error_json("url is not valid UTF-8"),
+        };
+        match serde_json::to_string(&query_cosmetic(url_str)) {
+            Ok(json) => json,
+            Err(error) => error_json(&error.to_string()),
+        }
+    });
+    let payload = result.unwrap_or_else(|_| error_json("query_cosmetic panicked"));
+    match CString::new(payload) {
+        Ok(cstr) => cstr.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Build a JSON error payload matching [`CompilerError`].

@@ -769,6 +769,10 @@ class BrowserManager: ObservableObject {
                 if #available(macOS 15.5, *), let mgr = self.extensionManager {
                     mgr.switchProfile(profile.id)
                 }
+                // Re-warm a spare WebView bound to the new profile's data
+                // store. The old spare (if any) gets discarded inside
+                // prewarmIfNeeded since the profile id changed.
+                self.webViewCoordinator?.prewarmIfNeeded(for: profile)
             }
 
             if animateTransition {

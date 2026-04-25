@@ -261,46 +261,10 @@ final class TrackingProtectionManager: ObservableObject {
     /// would land in the page world and could collide with site code.
     static let shieldsContentWorld = WKContentWorld.world(name: "SocketShields")
     private let thirdPartyCookieMarker = "document.requestStorageAccess = function()"
-    private let genericCleanupSelectors: [String] = [
-        // Cookie / consent banners
-        "#onetrust-banner-sdk",
-        ".ot-sdk-container",
-        ".fc-consent-root",
-        "[id*='cookie-consent']",
-        "[class*='cookie-consent']",
-        "[class*='cookie-banner']",
-        "[class*='consent-banner']",
-        "[aria-label='cookie banner']",
-        "[data-testid*='cookie']",
-        "[data-cookiebanner]",
-
-        // Ad containers — ONLY unambiguous ad-tech markers. Broad
-        // `[class*='ad-']` style patterns are deliberately omitted because
-        // they false-positive on legitimate content (e.g. `class="add-to-cart"`,
-        // `class="header"`, etc.).
-        "[id^='div-gpt-ad']",          // Google Publisher Tags — always an ad
-        "[id*='google_ads_iframe']",   // Google ads iframe
-        "[data-ad-slot]",              // AdSense — required attribute on ad slots
-        "[data-google-query-id]",      // GAM tracking attribute
-        "ins.adsbygoogle",             // AdSense markup convention
-        "[class*='adsbygoogle']",      // same
-
-        // Iframes resolving to known ad-tech hostnames. Each pattern is a
-        // unique-to-ads domain — no false-positive risk because no
-        // first-party site embeds these hosts for legitimate content.
-        "iframe[src*='googletagservices']",
-        "iframe[src*='googlesyndication']",
-        "iframe[src*='doubleclick.net']",
-        "iframe[src*='googleads.g.doubleclick']",
-        "iframe[src*='amazon-adsystem']",
-        "iframe[src*='adservice.google']",
-        "iframe[src*='adnxs.com']",
-        "iframe[src*='pubmatic.com']",
-        "iframe[src*='rubiconproject.com']",
-        "iframe[src*='criteo.com']",
-        "iframe[src*='taboola.com']",
-        "iframe[src*='outbrain.com']",
-    ]
+    // Selector-based cosmetic hiding is handled by WKContentRuleList's
+    // `css-display-none` rules emitted by adblock-rust. We intentionally
+    // do NOT maintain a separate JS selector list here — that path used
+    // to duplicate work the native rule engine already does.
     private let scriptletPolicy = ScriptletPolicy.conservative
 
     private var temporarilyDisabledTabs: [UUID: Date] = [:]
@@ -543,7 +507,7 @@ final class TrackingProtectionManager: ObservableObject {
 
         Task { @MainActor [weak self, weak webView] in
             guard let self, let webView else { return }
-            let hiddenCount = await self.applyGenericCleanupScript(to: webView)
+            let hiddenCount = await self.applyElementCollapseScript(to: webView)
             guard self.pageStatsByTabID[tab.id] != nil else { return }
             stats.hiddenElementCount = hiddenCount
             stats.scriptletActionCount = hiddenCount > 0 ? 1 : 0
@@ -898,6 +862,8 @@ final class TrackingProtectionManager: ObservableObject {
     }
 
     private func applyTracking(to webView: WKWebView) {
+        let signpostState = PerfSignpost.shields.beginInterval("applyTracking")
+        defer { PerfSignpost.shields.endInterval("applyTracking", signpostState) }
         guard let installedRuleList else { return }
         let controller = webView.configuration.userContentController
         controller.removeAllContentRuleLists()
@@ -923,25 +889,101 @@ final class TrackingProtectionManager: ObservableObject {
         controller.removeScriptMessageHandler(forName: Self.shieldsNotifyMessageName)
     }
 
-    // MARK: - Generic cleanup / telemetry
+    // MARK: - Element collapsing
+    //
+    // Selector-based ad/banner hiding is handled natively by WKContentRuleList
+    // via the `css-display-none` rules adblock-rust emits from EasyList. The
+    // only thing native rules can't do is element collapsing — when the
+    // network layer kills an iframe's request, WebKit leaves the empty
+    // container in place. This script walks iframes/imgs that look like
+    // blocked ads and hides their containers. One-shot at didFinish plus a
+    // single delayed re-pass for async-loading ads. No MutationObserver, no
+    // selector cleanup duplication.
 
-    private func applyGenericCleanupScript(to webView: WKWebView) async -> Int {
-        guard scriptletPolicy.mode != .disabled else { return 0 }
-        guard let selectorsData = try? JSONEncoder().encode(genericCleanupSelectors),
-              let selectorsJSON = String(data: selectorsData, encoding: .utf8) else {
-            return 0
+    /// Marker comment embedded in scriptlet user-scripts so we can find
+    /// and remove them on the next navigation. Scriptlets are URL-specific
+    /// and can collide if left behind across navigations.
+    private static let scriptletMarker = "// __SOCKET_SHIELDS_SCRIPTLET__"
+
+    /// Query the runtime adblock-rust engine for any cosmetic + scriptlet
+    /// resources that apply to `url` and inject them at documentStart on
+    /// the webview's UCC. Replaces any previously-injected scriptlet
+    /// (URL-specific, so old ones are stale). Call from
+    /// `decidePolicyForNavigationAction` BEFORE invoking the decision
+    /// handler — WKUserScripts added after `.load()` apply to the next
+    /// navigation, not the current one.
+    func applyURLSpecificScriptlets(for url: URL, on webView: WKWebView) {
+        guard isEnabled, shouldApplyTracking(to: webView) else { return }
+        guard let urlString = canonicalize(url) else { return }
+
+        let resources = ShieldsEngine.shared.queryCosmetic(url: urlString)
+        let controller = webView.configuration.userContentController
+
+        // Always strip stale scriptlets first — if the user navigates
+        // from youtube.com to nytimes.com, the YouTube scriptlets must
+        // not run on NYT.
+        let surviving = controller.userScripts.filter {
+            !$0.source.contains(Self.scriptletMarker)
         }
+        if surviving.count != controller.userScripts.count {
+            controller.removeAllUserScripts()
+            for script in surviving { controller.addUserScript(script) }
+        }
+
+        let scriptlet = resources.injectedScript
+        guard !scriptlet.isEmpty else { return }
+
+        // Wrap in an IIFE so any top-level declarations don't leak into
+        // the page world; tag with the marker so the next nav can remove
+        // it. Page world (default) is correct — scriptlets like aopr need
+        // to override page-side globals to neutralise anti-adblock checks.
+        let wrapped = """
+        \(Self.scriptletMarker)
+        (function() {
+          try {
+        \(scriptlet)
+          } catch (e) {}
+        })();
+        """
+        controller.addUserScript(WKUserScript(
+            source: wrapped,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+    }
+
+    /// Decide whether the webview belongs to a tab that currently has
+    /// Shields applied. Mirrors the `shouldApplyTracking(to: tab)` check
+    /// but resolved by webview reference. Used when callers (e.g.
+    /// `applyURLSpecificScriptlets`) only have the WKWebView in hand.
+    private func shouldApplyTracking(to webView: WKWebView) -> Bool {
+        guard let browserManager else { return false }
+        guard let tab = browserManager.tabManager.allTabs().first(where: { tab in
+            existingWebView(for: tab) === webView
+        }) else { return false }
+        return shouldApplyTracking(to: tab)
+    }
+
+    private func canonicalize(_ url: URL) -> String? {
+        // adblock-rust expects a fully-qualified URL with scheme+host.
+        // Filter out chrome://, about:, file:// — they have no cosmetic
+        // rules and the engine returns empty anyway.
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else {
+            return nil
+        }
+        return url.absoluteString
+    }
+
+    private func applyElementCollapseScript(to webView: WKWebView) async -> Int {
+        let signpostState = PerfSignpost.shields.beginInterval("applyElementCollapseScript")
+        defer { PerfSignpost.shields.endInterval("applyElementCollapseScript", signpostState) }
+        guard scriptletPolicy.mode != .disabled else { return 0 }
 
         let script = """
         (function() {
           try {
-            const selectors = \(selectorsJSON);
-            const hasSelectors = Array.isArray(selectors) && selectors.length > 0;
-
-            if (window.__socketShieldsCleanupObserver) {
-              try { window.__socketShieldsCleanupObserver.disconnect(); } catch (e) {}
-            }
-
             const seen = new WeakSet();
             let hiddenCount = 0;
 
@@ -956,30 +998,12 @@ final class TrackingProtectionManager: ObservableObject {
               } catch (e) {}
             };
 
-            const applyCleanup = () => {
-              if (hasSelectors) {
-                selectors.forEach((selector) => {
-                  try {
-                    document.querySelectorAll(selector).forEach(hideNode);
-                  } catch (e) {}
-                });
-              }
-              return hiddenCount;
-            };
-
-            // Element-collapse pass: when WKContentRuleList kills a network
-            // request, the placeholder iframe/img is still in the DOM and
-            // reserves layout space (the visible white box on ad-heavy
-            // pages). Walk every iframe/img that loaded with no content,
-            // climb to its container, and hide the whole thing — same
-            // behaviour Brave/uBlock Origin call "element collapsing".
-            const COLLAPSE_THRESHOLD_PX = 20;
             // Strict ad-container test — only matches markers that are
             // *exclusively* used for advertising containers. We deliberately
             // avoid matching loose substrings like 'banner' or 'promo'
-            // because they appear on legitimate site furniture (hero
-            // banners, promotion blocks). False-positives here would hide
-            // real content; we'd rather leave a tiny bit of whitespace.
+            // because they appear on legitimate site furniture. False-
+            // positives here hide real content; we'd rather leave a little
+            // whitespace.
             const adAttrPattern = /(?:^|[\\s_-])(?:advertisement|advertising|advertorial|adsense|adsbygoogle|adslot|adunit|adcontainer|adwrapper)(?:$|[\\s_-])|^div-gpt-ad|google_ads_iframe/;
             const isLikelyAdContainer = (el) => {
               if (!el || el === document.body || el === document.documentElement) return false;
@@ -991,10 +1015,6 @@ final class TrackingProtectionManager: ObservableObject {
               return false;
             };
             const findAdContainer = (start) => {
-              // Walk up looking for an UNAMBIGUOUS ad container. If we
-              // can't find one within 4 hops, return null and leave the
-              // wrapper alone. This keeps empty-but-legitimate embeds from
-              // collapsing page structure.
               let el = start;
               for (let depth = 0; depth < 5 && el && el !== document.body; depth += 1) {
                 if (isLikelyAdContainer(el)) return el;
@@ -1002,69 +1022,45 @@ final class TrackingProtectionManager: ObservableObject {
               }
               return null;
             };
-            // Iframe `src` patterns we treat as definitively-an-ad even when
-            // we can't peek at their contentDocument (cross-origin). When
-            // WKContentRuleList kills the request, the iframe element
-            // stays in the DOM with these src strings — collapsing the
-            // wrapper reclaims the layout space.
+            // Iframe src patterns we treat as definitively-an-ad even when
+            // we can't peek at contentDocument (cross-origin).
             const AD_HOST_PATTERN = /(googletagservices|googlesyndication|doubleclick\\.net|googleads\\.g\\.doubleclick|amazon-adsystem|adservice\\.google|adnxs\\.com|pubmatic\\.com|rubiconproject\\.com|criteo|taboola|outbrain|adsystem|adform)/i;
 
             const collapseEmpties = () => {
               try {
                 document.querySelectorAll('iframe, img').forEach((el) => {
                   if (seen.has(el)) return;
-                  // Skip elements with negligible footprint.
-                  const r = el.getBoundingClientRect();
-                  if (r.width < COLLAPSE_THRESHOLD_PX && r.height < COLLAPSE_THRESHOLD_PX) return;
-
                   const adContainer = findAdContainer(el);
                   let blocked = false;
                   let collapseTarget = adContainer;
                   if (el.tagName === 'IMG') {
-                    // Broken images are only safe to collapse when they're
-                    // inside an explicitly ad-marked container.
                     blocked = !!adContainer && el.complete && el.naturalWidth === 0 && el.naturalHeight === 0;
                   } else if (el.tagName === 'IFRAME') {
                     const src = (el.getAttribute('src') || '').trim();
-                    // 1) Known ad-tech host in src — collapse regardless of
-                    //    cross-origin opacity.
                     if (AD_HOST_PATTERN.test(src)) {
                       blocked = true;
                       collapseTarget = adContainer || el;
-                    } else {
-                      // 2) Same-origin / no-src iframes: only collapse when
-                      //    an explicit ad marker exists nearby. Blank iframes
-                      //    are common in legitimate widgets and login flows.
-                      if (adContainer) {
-                        try {
-                          blocked = (el.contentDocument && !el.contentDocument.body)
-                                 || src === '' || src === 'about:blank';
-                        } catch (e) {
-                          // Cross-origin without an ad-host match — leave alone.
-                          blocked = false;
-                        }
+                    } else if (adContainer) {
+                      try {
+                        blocked = (el.contentDocument && !el.contentDocument.body)
+                               || src === '' || src === 'about:blank';
+                      } catch (e) {
+                        blocked = false;
                       }
                     }
                   }
-
                   if (!blocked || !collapseTarget) return;
                   hideNode(collapseTarget);
                 });
               } catch (e) {}
             };
 
-            applyCleanup();
             collapseEmpties();
-            const observer = new MutationObserver(() => {
-              applyCleanup();
-              collapseEmpties();
-            });
-            observer.observe(document.documentElement || document.body, {
-              subtree: true,
-              childList: true,
-              attributes: false
-            });
-            window.__socketShieldsCleanupObserver = observer;
+            // One delayed re-pass catches async-loading ads (third-party
+            // scripts that inject placeholders after first paint). We don't
+            // use a MutationObserver — re-running on every DOM mutation
+            // dwarfs the cost of letting a few late ads through.
+            setTimeout(collapseEmpties, 2000);
             return hiddenCount;
           } catch (e) {
             return 0;
@@ -1104,9 +1100,9 @@ final class TrackingProtectionManager: ObservableObject {
         // networkRuleCount and cosmeticRuleCount reset to 0 per navigation;
         // they're real-time counters now, populated by the notify handler
         // (`handleShieldsNotify`) for network blocks and by
-        // `applyGenericCleanupScript` for cosmetic hides. The artifact's
-        // total rule count is surfaced separately as the "rules loaded"
-        // figure in Settings — it's not a per-page metric.
+        // `applyElementCollapseScript` for collapsed ad containers. The
+        // artifact's total rule count is surfaced separately as the
+        // "rules loaded" figure in Settings — it's not a per-page metric.
         PageBlockStats(
             networkRuleCount: 0,
             cosmeticRuleCount: 0,
@@ -1142,12 +1138,64 @@ final class TrackingProtectionManager: ObservableObject {
 
     // MARK: - Persistence
 
+    /// Subscription IDs that were shipped briefly as defaults but found to
+    /// over-block sites we care about (YouTube, anti-adblock-detected pages).
+    /// We strip them out of any persisted state on load so users who got
+    /// them in an earlier build don't keep paying the breakage. If a user
+    /// re-adds them manually we honor that — only auto-added entries with
+    /// these exact IDs are removed.
+    ///
+    /// Brave Specific is intentionally NOT here anymore — once the runtime
+    /// adblock-rust Engine + scriptlet injection landed, it can ship safely
+    /// because the YouTube anti-anti-adblock scriptlets (vaft-ublock-origin,
+    /// video-swap-new-ublock-origin) are now bundled and applied per
+    /// navigation in `applyURLSpecificScriptlets`.
+    private static let deprecatedAutoSubscriptionIds: Set<String> = [
+        // uBO Filters – General is broad enough to overlap with EasyList
+        // and double the rule list size; keep deprecated unless we add
+        // chunking. Brave Social blocks too many widgets users actively
+        // engage with (login buttons, share counts).
+        "ubo-filters-general",
+        "brave-social",
+        // uBO Quick Fixes + Resource Abuse broke YouTube even with our
+        // MVP scriptlet bundle in place. Most likely cause: the
+        // hand-written scriptlets (aopr / set-constant / nostif) are
+        // simpler than uBO's production versions, and our simplified
+        // behaviour is wrong for at least one rule that fires on the
+        // YouTube path. Until we either (a) bundle uBO's real assembled
+        // scriptlets via build.rs, or (b) audit each rule individually,
+        // these stay deprecated.
+        "ubo-quick-fixes",
+        "ubo-resource-abuse",
+    ]
+
     private func loadPersistedState() {
         if let data = try? Data(contentsOf: stateFileURL()),
            let decoded = try? JSONDecoder().decode(PersistedShieldsState.self, from: data) {
             filterSubscriptions = decoded.subscriptions
             allowedDomains = Set(decoded.allowedDomains)
             activeArtifact = decoded.activeArtifact
+
+            // Remove deprecated auto-added subscriptions (over-blockers).
+            let beforeCount = filterSubscriptions.count
+            filterSubscriptions.removeAll {
+                Self.deprecatedAutoSubscriptionIds.contains($0.id)
+            }
+            if filterSubscriptions.count != beforeCount {
+                // Mark the persisted artifact stale so next refresh recompiles.
+                activeArtifact = nil
+            }
+
+            // Migration: when we expand defaultSubscriptions() (e.g. add new
+            // Brave catalog lists), existing users still load the older set
+            // from disk. Merge in any new default IDs they haven't seen so
+            // they get the upgraded coverage on next refresh. Existing
+            // subscriptions keep their user-set isEnabled state untouched.
+            let existingIds = Set(filterSubscriptions.map { $0.id })
+            let newDefaults = Self.defaultSubscriptions().filter { !existingIds.contains($0.id) }
+            if !newDefaults.isEmpty {
+                filterSubscriptions.append(contentsOf: newDefaults)
+            }
         } else {
             filterSubscriptions = Self.defaultSubscriptions()
             allowedDomains = []
@@ -1508,6 +1556,115 @@ final class TrackingProtectionManager: ObservableObject {
                 checksum: nil,
                 lastUpdatedAt: nil,
                 lastErrorDescription: nil
+            ),
+
+            // ────────────────────────────────────────────────────────────
+            // Conservative additions from Brave's catalog
+            // (https://github.com/brave/adblock-resources/blob/master/filter_lists/list_catalog.json).
+            //
+            // The full Brave default set (uBO General/Resource-Abuse/Quick-Fixes,
+            // brave-specific.txt, etc.) breaks YouTube and other anti-adblock
+            // sites because Brave applies them alongside their full
+            // first-party-protection pipeline + Brave-side scriptlets that
+            // we don't replicate. Until we add proper first-party-protection
+            // ordering and the matching unbreak/scriptlet support, only the
+            // narrowly-scoped, low-false-positive lists go in by default.
+            //
+            // Lists held back (kept here as comments so we know what to
+            // re-enable once the unbreak path is in):
+            //   - uBO Filters – General (broad blocking, needs uBO Unbreak)
+            //   - uBO Filters – Resource Abuse (breaks YT anti-adblock)
+            //   - uBO Filters – Quick Fixes (depends on rest of uBO stack)
+            //   - uBO Filters – Unbreak (no-op without the things it unbreaks)
+            //   - Brave Specific / Brave Unbreak / Brave Social (need Brave's
+            //     pipeline to work safely)
+
+            FilterSubscription(
+                id: "ubo-privacy",
+                title: "uBlock Origin Filters – Privacy",
+                category: .core,
+                source: .remote,
+                format: .standard,
+                remoteURLString: "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt",
+                isEnabled: true,
+                checksum: nil,
+                lastUpdatedAt: nil,
+                lastErrorDescription: nil
+            ),
+            FilterSubscription(
+                id: "ubo-badware",
+                title: "uBlock Origin Filters – Badware",
+                category: .core,
+                source: .remote,
+                format: .standard,
+                remoteURLString: "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/badware.txt",
+                isEnabled: true,
+                checksum: nil,
+                lastUpdatedAt: nil,
+                lastErrorDescription: nil
+            ),
+            FilterSubscription(
+                id: "urlhaus-malware",
+                title: "URLhaus Malicious URL Blocklist",
+                category: .core,
+                source: .remote,
+                format: .standard,
+                remoteURLString: "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-agh-online.txt",
+                isEnabled: true,
+                checksum: nil,
+                lastUpdatedAt: nil,
+                lastErrorDescription: nil
+            ),
+
+            // Brave Specific — re-enabled now that runtime scriptlet
+            // injection (`applyURLSpecificScriptlets`) ships the YouTube
+            // unbreak scriptlets bundled in `brave-resources.json`.
+            // Without scriptlet support this list breaks YouTube.
+            FilterSubscription(
+                id: "brave-specific",
+                title: "Brave Specific",
+                category: .core,
+                source: .remote,
+                format: .standard,
+                remoteURLString: "https://raw.githubusercontent.com/brave/adblock-lists/master/brave-lists/brave-specific.txt",
+                isEnabled: true,
+                checksum: nil,
+                lastUpdatedAt: nil,
+                lastErrorDescription: nil
+            ),
+
+            // Brave Unbreak — exception rules that prevent JS from hanging
+            // on blocked subresources (the typical cause of total-load
+            // tails when adblock kills a request whose `onload` handler
+            // a script depends on). Mostly `@@` exceptions with no new
+            // blocks of its own.
+            FilterSubscription(
+                id: "brave-unbreak",
+                title: "Brave Unbreak",
+                category: .core,
+                source: .remote,
+                format: .standard,
+                remoteURLString: "https://raw.githubusercontent.com/brave/adblock-lists/master/brave-lists/brave-unbreak.txt",
+                isEnabled: true,
+                checksum: nil,
+                lastUpdatedAt: nil,
+                lastErrorDescription: nil
+            ),
+
+            // uBO Unbreak — generic exceptions for things broken by other
+            // uBO/EasyList rules. Same purpose as Brave Unbreak but
+            // upstream from uBlock Origin.
+            FilterSubscription(
+                id: "ubo-unbreak",
+                title: "uBlock Origin Filters – Unbreak",
+                category: .core,
+                source: .remote,
+                format: .standard,
+                remoteURLString: "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/unbreak.txt",
+                isEnabled: true,
+                checksum: nil,
+                lastUpdatedAt: nil,
+                lastErrorDescription: nil
             )
         ]
     }
@@ -1608,21 +1765,40 @@ final class TrackingProtectionManager: ObservableObject {
         // native so per-tab block counts reflect real activity. The notify
         // mirror rules carry the identifier "socketShields"; we match on
         // that to avoid double-counting unrelated content-blocker events.
+        //
+        // Block bursts on ad-heavy pages can fire hundreds of events per
+        // navigation. Posting one message per event hammers the native
+        // bridge; coalesce into ~200ms windows and send a count, flushing
+        // eagerly on pagehide so we don't drop the final batch.
         (function() {
           if (window.__socketShieldsNotifyListenerInstalled) return;
           window.__socketShieldsNotifyListenerInstalled = true;
+          var pending = 0;
+          var flushHandle = null;
+          var FLUSH_DELAY_MS = 200;
+          function flush() {
+            flushHandle = null;
+            if (pending === 0) return;
+            var count = pending;
+            pending = 0;
+            try {
+              if (window.webkit && window.webkit.messageHandlers
+                  && window.webkit.messageHandlers.\(Self.shieldsNotifyMessageName)) {
+                window.webkit.messageHandlers.\(Self.shieldsNotifyMessageName).postMessage({ count: count });
+              }
+            } catch (e) {}
+          }
           document.addEventListener('webkitcontentblocked', function(event) {
             try {
               var detail = event && event.detail;
               if (!detail || detail.identifier !== 'socketShields') return;
-              if (window.webkit && window.webkit.messageHandlers
-                  && window.webkit.messageHandlers.\(Self.shieldsNotifyMessageName)) {
-                window.webkit.messageHandlers.\(Self.shieldsNotifyMessageName).postMessage({
-                  url: detail.url || (event.target && event.target.URL) || ''
-                });
+              pending += 1;
+              if (flushHandle === null) {
+                flushHandle = setTimeout(flush, FLUSH_DELAY_MS);
               }
             } catch (e) {}
           }, false);
+          window.addEventListener('pagehide', flush, { once: true });
         })();
         """
         controller.addUserScript(WKUserScript(
@@ -1633,15 +1809,17 @@ final class TrackingProtectionManager: ObservableObject {
     }
 
     /// Bump the network block counter for whichever tab owns `webView`.
-    /// Called from `ShieldsNotifyMessageHandler` on every notify event.
-    fileprivate func handleShieldsNotify(from webView: WKWebView?) {
+    /// Called from `ShieldsNotifyMessageHandler` on each batched flush; the
+    /// JS listener coalesces bursts over ~200ms, so `count` is usually > 1.
+    fileprivate func handleShieldsNotify(from webView: WKWebView?, count: Int) {
+        guard count > 0 else { return }
         guard let webView else { return }
         guard let browserManager else { return }
         guard let tab = browserManager.tabManager.allTabs().first(where: { tab in
             existingWebView(for: tab) === webView
         }) else { return }
         var stats = pageStatsByTabID[tab.id] ?? makeEmptyStats(for: tab)
-        stats.networkRuleCount += 1
+        stats.networkRuleCount += count
         pageStatsByTabID[tab.id] = stats
         pageStatesByTabID[tab.id] = siteProtectionState(for: tab)
     }
@@ -1668,8 +1846,15 @@ private final class ShieldsNotifyMessageHandler: NSObject, WKScriptMessageHandle
         // reference is captured before the hop because WKScriptMessage
         // properties aren't Sendable.
         let webView = message.webView
+        let count: Int = {
+            if let dict = message.body as? [String: Any],
+               let raw = dict["count"] as? NSNumber {
+                return max(raw.intValue, 0)
+            }
+            return 1
+        }()
         Task { @MainActor [weak self] in
-            self?.manager?.handleShieldsNotify(from: webView)
+            self?.manager?.handleShieldsNotify(from: webView, count: count)
         }
     }
 }

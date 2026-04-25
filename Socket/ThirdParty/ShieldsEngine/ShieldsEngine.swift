@@ -25,6 +25,33 @@ struct ShieldsEngineOutput: Decodable, Sendable {
     let cosmeticRuleCount: Int
 }
 
+/// Matches `CosmeticQueryOutput` in Support/ShieldsCompiler/src/lib.rs.
+/// Returned by `ShieldsEngine.queryCosmetic(url:)` for per-navigation
+/// scriptlet + cosmetic injection.
+struct CosmeticQueryOutput: Decodable, Sendable {
+    let hideSelectors: [String]
+    let proceduralActions: [String]
+    let exceptions: [String]
+    let injectedScript: String
+    let generichide: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case hideSelectors = "hide_selectors"
+        case proceduralActions = "procedural_actions"
+        case exceptions
+        case injectedScript = "injected_script"
+        case generichide
+    }
+
+    static let empty = CosmeticQueryOutput(
+        hideSelectors: [],
+        proceduralActions: [],
+        exceptions: [],
+        injectedScript: "",
+        generichide: false
+    )
+}
+
 /// Error surface from the engine. Wraps both Rust-side errors (returned as
 /// `{"error":"..."}` JSON) and Swift-side JSON / UTF-8 failures.
 enum ShieldsEngineError: Error, CustomStringConvertible {
@@ -65,6 +92,8 @@ final class ShieldsEngine: @unchecked Sendable {
     /// subprocess-compatible JSON ready.
     func compile(rawJSON: String) throws -> ShieldsEngineOutput {
         let started = Date()
+        let signpostState = PerfSignpost.shields.beginInterval("ShieldsEngine.compile")
+        defer { PerfSignpost.shields.endInterval("ShieldsEngine.compile", signpostState) }
 
         // rawJSON must round-trip cleanly to UTF-8; withCString handles
         // that for us and passes a null-terminated C string to Rust.
@@ -100,5 +129,27 @@ final class ShieldsEngine: @unchecked Sendable {
         } catch {
             throw ShieldsEngineError.decodeFailure(error)
         }
+    }
+
+    /// Query the runtime engine for cosmetic resources + scriptlets that
+    /// apply to `url`. Returns `.empty` rather than throwing on the
+    /// "engine not yet built" path since that's a normal cold-start
+    /// state, not an error condition. Safe to call from any thread.
+    func queryCosmetic(url: String) -> CosmeticQueryOutput {
+        let rawOutput: String? = url.withCString { inputPtr in
+            guard let outPtr = shields_query_cosmetic(inputPtr) else { return nil }
+            defer { shields_free_string(outPtr) }
+            return String(validatingCString: outPtr)
+        }
+        guard let raw = rawOutput, let data = raw.data(using: .utf8) else {
+            return .empty
+        }
+        // Surface a Rust-side error JSON as an empty result — the caller
+        // is on the navigation hot path and can't usefully recover.
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           obj["error"] != nil {
+            return .empty
+        }
+        return (try? JSONDecoder().decode(CosmeticQueryOutput.self, from: data)) ?? .empty
     }
 }

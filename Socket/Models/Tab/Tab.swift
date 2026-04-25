@@ -13,6 +13,7 @@ import FaviconFinder
 import Foundation
 import SwiftUI
 import WebKit
+import os
 
 @MainActor
 public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
@@ -92,6 +93,10 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     private var pendingOAuthReturnWorkItem: DispatchWorkItem?
     private var cachedOAuthStorageSnapshot: OAuthStorageSnapshot?
     private var scheduledAuthPageDiagnosticKeys: Set<String> = []
+
+    /// OSSignposter state for the current provisional-nav → didFinish interval.
+    /// Reset on each didStart so nested/concurrent navigations don't cross streams.
+    private var navigationSignpostState: OSSignpostIntervalState?
     private var scheduledSiteOwnedOAuthBridgeKeys: Set<String> = []
     private var completedSiteOwnedOAuthBridgeKeys: Set<String> = []
 
@@ -2734,6 +2739,12 @@ extension Tab: WKNavigationDelegate {
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
+        // If a previous navigation never resolved, close its interval before
+        // starting a new one so Instruments doesn't chain them together.
+        if let prior = navigationSignpostState {
+            PerfSignpost.navigation.endInterval("Navigation", prior)
+        }
+        navigationSignpostState = PerfSignpost.navigation.beginInterval("Navigation")
         print(
             "🌐 [Tab] didStartProvisionalNavigation for: \(webView.url?.absoluteString ?? "unknown")"
         )
@@ -2821,6 +2832,10 @@ extension Tab: WKNavigationDelegate {
         _ webView: WKWebView,
         didFinish navigation: WKNavigation!
     ) {
+        if let state = navigationSignpostState {
+            PerfSignpost.navigation.endInterval("Navigation", state)
+            navigationSignpostState = nil
+        }
         print("✅ [Tab] didFinish navigation for: \(webView.url?.absoluteString ?? "unknown")")
         loadingState = .didFinish
         if #available(macOS 15.5, *) {
@@ -2916,7 +2931,9 @@ extension Tab: WKNavigationDelegate {
         injectPiPStateListener(to: webView)
         injectMediaDetection(to: webView)
         injectHistoryStateObserver(into: webView)
-        injectShortcutDetection(to: webView)
+        // Shortcut detection is already attached as a documentEnd userScript
+        // (WebViewCoordinator.swift). The script's idempotency guard makes a
+        // post-didFinish re-evaluation a no-op except for parse cost — skip.
         updateNavigationStateEnhanced(source: "didCommit")
 
         // Trigger background color extraction after page fully loads
@@ -2958,6 +2975,10 @@ extension Tab: WKNavigationDelegate {
         didFail navigation: WKNavigation!,
         withError error: Error
     ) {
+        if let state = navigationSignpostState {
+            PerfSignpost.navigation.endInterval("Navigation", state)
+            navigationSignpostState = nil
+        }
         print("❌ [Tab] didFail navigation for: \(webView.url?.absoluteString ?? "unknown")")
         print("   Error: \(error.localizedDescription)")
         loadingState = .didFail(error)
@@ -2978,6 +2999,10 @@ extension Tab: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
+        if let state = navigationSignpostState {
+            PerfSignpost.navigation.endInterval("Navigation", state)
+            navigationSignpostState = nil
+        }
         print(
             "💥 [Tab] didFailProvisionalNavigation for: \(webView.url?.absoluteString ?? "unknown")")
         print("   Error: \(error.localizedDescription)")
@@ -3051,6 +3076,15 @@ extension Tab: WKNavigationDelegate {
             if #available(macOS 15.4, *) {
                 ExtensionManager.shared.grantExtensionAccessToURL(url)
             }
+
+            // Inject Shields scriptlets for this URL BEFORE the load
+            // begins. WKUserScripts added after `.load()` apply to the
+            // *next* navigation, so this must happen here. Engine
+            // returns empty (no-op) for URLs with no scriptlet rules.
+            browserManager?.trackingProtectionManager.applyURLSpecificScriptlets(
+                for: url,
+                on: webView
+            )
 
             // Setup boost user script before navigation starts
             setupBoostUserScript(for: url, in: webView)
