@@ -88,6 +88,46 @@ final class PasswordCredentialStoreTests: XCTestCase {
                 multi-match queries. Run these tests signed.
                 """)
         }
+
+        // Cross-profile isolation probe — the previous count-only check passes
+        // on CI runners whose classic (non-data-protection) Keychain ignores
+        // the kSecAttrService filter. The probe inserts one record so any
+        // single-record fetch returns 1; meanwhile the actual tests insert
+        // records across multiple profiles and discover the filter is broken
+        // when fetchAll returns rows from the wrong profile. Catch that here
+        // by inserting under a *second* probe profile and verifying both
+        // queries scope correctly. Skip the suite if they don't.
+        let secondProfile = UUID()
+        let secondSave = probeStore.save(host: "probe.local",
+                                         username: "probe-user-2",
+                                         password: "probe-pw-2",
+                                         sync: false,
+                                         profile: secondProfile)
+        guard case .success = secondSave else {
+            throw XCTSkip("Keychain probe second-profile save failed; skipping suite.")
+        }
+
+        let foundFirst = probeStore.fetchAll(for: "probe.local",
+                                             profile: probeProfile,
+                                             includePassword: false)
+        let foundSecond = probeStore.fetchAll(for: "probe.local",
+                                              profile: secondProfile,
+                                              includePassword: false)
+        let firstIsolated = foundFirst.count == 1
+            && foundFirst.first?.username == "probe-user"
+        let secondIsolated = foundSecond.count == 1
+            && foundSecond.first?.username == "probe-user-2"
+        if !firstIsolated || !secondIsolated {
+            throw XCTSkip("""
+                Keychain attribute filtering broken in this test host: \
+                fetchAll for profile A returned \(foundFirst.count) records \
+                (\(foundFirst.first?.username ?? "nil")), profile B returned \
+                \(foundSecond.count) (\(foundSecond.first?.username ?? "nil")) — \
+                expected one of each, isolated by kSecAttrService. Common on \
+                unsigned macOS 15+ CI runners where the classic Keychain \
+                silently ignores the service filter. Run these tests signed.
+                """)
+        }
     }
 
     // MARK: - Save / fetch
