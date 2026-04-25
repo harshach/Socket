@@ -18,6 +18,13 @@ class WebViewCoordinator {
     /// Prevent recursive sync calls
     private var isSyncingTab: Set<UUID> = []
 
+    /// A spare WKWebView kept warm so the WebContent process spawn cost
+    /// (typically 50–150ms) is paid off the critical path. When a new tab
+    /// is created with a matching profile, we hand off this instance and
+    /// kick off a fresh warm in the background.
+    private var prewarmedWebView: WKWebView?
+    private var prewarmedProfileId: UUID?
+
     /// Weak wrapper for NSView references stored per window
     private struct WeakNSView { weak var view: NSView? }
 
@@ -166,27 +173,43 @@ class WebViewCoordinator {
     
     /// Internal method to create a WebView with proper configuration
     private func createWebViewInternal(for tab: Tab, in windowId: UUID, isPrimary: Bool, copyFrom: WKWebView? = nil) -> WKWebView {
+        let signpostState = PerfSignpost.webView.beginInterval("createWebViewInternal")
+        defer { PerfSignpost.webView.endInterval("createWebViewInternal", signpostState) }
         let tabId = tab.id
-        
-        // Derive config from shared config or existing webview to preserve
-        // process pool + extension controller (fresh configs break content script injection)
-        let configuration: WKWebViewConfiguration
-        if let sourceWebView = copyFrom ?? tab.existingWebView {
-            // .configuration returns a copy — preserves process pool, extension controller, etc.
-            configuration = sourceWebView.configuration
-        } else {
-            let resolvedProfile = tab.resolveProfile()
-            if let profile = resolvedProfile {
-                configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration(for: profile)
-            } else {
-                configuration = BrowserConfiguration.shared.webViewConfiguration.copy() as! WKWebViewConfiguration
-            }
-        }
-        // Fresh user content controller per webview to avoid cross-tab handler conflicts
-        // (preserves shared scripts like extension bridge polyfills)
-        configuration.userContentController = BrowserConfiguration.shared.freshUserContentController()
+        let resolvedProfile = tab.resolveProfile()
 
-        let newWebView = FocusableWKWebView(frame: .zero, configuration: configuration)
+        // Try to use a prewarmed webview when this is a fresh primary tab
+        // (clones must share config with the primary; tabs deriving from an
+        // existing webview can't be remapped). Profile must match — the
+        // prewarm is bound to a specific WKWebsiteDataStore.
+        let usingPrewarm: Bool
+        let configuration: WKWebViewConfiguration
+        let newWebView: FocusableWKWebView
+        if copyFrom == nil, tab.existingWebView == nil,
+           let prewarmed = takePrewarmedWebView(for: resolvedProfile?.id) as? FocusableWKWebView {
+            newWebView = prewarmed
+            configuration = prewarmed.configuration
+            usingPrewarm = true
+        } else {
+            // Derive config from shared config or existing webview to preserve
+            // process pool + extension controller (fresh configs break content script injection)
+            if let sourceWebView = copyFrom ?? tab.existingWebView {
+                // .configuration returns a copy — preserves process pool, extension controller, etc.
+                configuration = sourceWebView.configuration
+            } else {
+                if let profile = resolvedProfile {
+                    configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration(for: profile)
+                } else {
+                    configuration = BrowserConfiguration.shared.webViewConfiguration.copy() as! WKWebViewConfiguration
+                }
+            }
+            // Fresh user content controller per webview to avoid cross-tab handler conflicts
+            // (preserves shared scripts like extension bridge polyfills)
+            configuration.userContentController = BrowserConfiguration.shared.freshUserContentController()
+
+            newWebView = FocusableWKWebView(frame: .zero, configuration: configuration)
+            usingPrewarm = false
+        }
         newWebView.navigationDelegate = tab
         newWebView.uiDelegate = tab
         newWebView.allowsBackForwardNavigationGestures = true
@@ -200,10 +223,16 @@ class WebViewCoordinator {
         newWebView.contextMenuBridge = WebContextMenuBridge(tab: tab, configuration: configuration)
         
         SocketMessageHandlers.register(on: newWebView, for: tab)
+        // Inject at documentEnd (not documentStart) to keep the ~500-line
+        // detector script off the critical-path parse before HTML parsing
+        // begins. The addEventListener hook misses listeners registered by
+        // inline <script> tags as a result, but those are a small minority —
+        // React/Vue/vanilla pages overwhelmingly register key listeners after
+        // DOMContentLoaded, which is still before us.
         newWebView.configuration.userContentController.addUserScript(
             WKUserScript(
                 source: WebsiteShortcutDetector.jsDetectionScript,
-                injectionTime: .atDocumentStart,
+                injectionTime: .atDocumentEnd,
                 forMainFrameOnly: true
             )
         )
@@ -215,16 +244,33 @@ class WebViewCoordinator {
 
         tab.setupThemeColorObserver(for: newWebView)
 
-        // Only load URL if this is the primary or if we're creating a clone
-        // For clones, we sync the URL via syncTab later
         if let url = URL(string: tab.url.absoluteString) {
-            newWebView.load(URLRequest(url: url))
+            // For clones, the primary has already fetched this URL — bias the
+            // clone's initial request toward the shared HTTP cache so we're
+            // not paying a full second round-trip for each multi-window
+            // display. Primary windows use the default policy so fresh loads
+            // behave normally.
+            var request = URLRequest(url: url)
+            if !isPrimary {
+                request.cachePolicy = .returnCacheDataElseLoad
+            }
+            newWebView.load(request)
         }
         newWebView.isMuted = tab.isAudioMuted
 
         setWebView(newWebView, for: tabId, in: windowId)
 
-        let typeStr = isPrimary ? "PRIMARY" : "CLONE"
+        // If we just consumed the spare, kick off a fresh warm in the
+        // background for the next tab-open. The DispatchQueue hop keeps
+        // this off the critical path so the current tab can finish
+        // wiring up while WebKit spawns the next WebContent process.
+        if usingPrewarm {
+            Task { @MainActor [weak self, resolvedProfile] in
+                self?.prewarmIfNeeded(for: resolvedProfile)
+            }
+        }
+
+        let typeStr = isPrimary ? (usingPrewarm ? "PRIMARY (prewarm)" : "PRIMARY") : "CLONE"
         DLog("🔍 [MEMDEBUG] WebViewCoordinator CREATED \(typeStr) WebView - Tab: \(tabId.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), DataStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
         
         // Log all WebViews now tracked for this tab
@@ -468,5 +514,67 @@ class WebViewCoordinator {
             webView.isMuted = muted
             print("🔇 [WebViewCoordinator] Window \(windowId): muted=\(muted)")
         }
+    }
+
+    // MARK: - WebView Pre-warming
+
+    /// Build a spare WKWebView for the given profile if we don't already have
+    /// one warmed for it. The spare loads `about:blank` immediately so the
+    /// WebContent process is spawned and the page allocator is hot before the
+    /// user opens a new tab. Tab-specific wiring (delegates, message
+    /// handlers, tracking protection, scripts) is intentionally deferred to
+    /// `createWebViewInternal` so the spare can be handed off to any tab.
+    func prewarmIfNeeded(for profile: Profile?) {
+        let profileId = profile?.id
+        if prewarmedWebView != nil && prewarmedProfileId == profileId { return }
+        // Profile changed — discard the stale spare before allocating a new one.
+        if prewarmedWebView != nil { discardPrewarm() }
+
+        let configuration: WKWebViewConfiguration
+        if let profile {
+            configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration(for: profile)
+        } else {
+            configuration = BrowserConfiguration.shared.webViewConfiguration.copy() as! WKWebViewConfiguration
+            configuration.userContentController = BrowserConfiguration.shared.freshUserContentController()
+        }
+
+        let webView = FocusableWKWebView(frame: .zero, configuration: configuration)
+        webView.allowsBackForwardNavigationGestures = true
+        webView.allowsMagnification = true
+        webView.underPageBackgroundColor = .white
+        webView.setValue(true, forKey: "drawsBackground")
+        // about:blank is enough to spawn the WebContent process. The real
+        // navigation happens at handoff and replaces this; the user never
+        // sees the prewarm load.
+        if let blank = URL(string: "about:blank") {
+            webView.load(URLRequest(url: blank))
+        }
+
+        prewarmedWebView = webView
+        prewarmedProfileId = profileId
+        DLog("🔥 [Prewarm] Spare WebView ready for profile \(profileId?.uuidString.prefix(8) ?? "default")")
+    }
+
+    /// Hand off the prewarmed webview if its profile matches and clear our
+    /// cached reference. Returns nil if no spare or profile mismatch — the
+    /// caller falls back to allocating fresh.
+    private func takePrewarmedWebView(for profileId: UUID?) -> WKWebView? {
+        guard let webView = prewarmedWebView, prewarmedProfileId == profileId else {
+            return nil
+        }
+        prewarmedWebView = nil
+        prewarmedProfileId = nil
+        DLog("🔥 [Prewarm] Handing off spare for profile \(profileId?.uuidString.prefix(8) ?? "default")")
+        return webView
+    }
+
+    /// Drop the spare WebView and let WebKit reclaim its WebContent process.
+    /// Call on memory pressure or when the active profile changes for good
+    /// (so the spare doesn't pin the wrong WKWebsiteDataStore).
+    func discardPrewarm() {
+        prewarmedWebView?.stopLoading()
+        prewarmedWebView?.removeFromSuperview()
+        prewarmedWebView = nil
+        prewarmedProfileId = nil
     }
 }

@@ -32,6 +32,15 @@ char *shields_compile(const char *input_json);
 /// Free a string returned by `shields_compile`. Passing NULL is a no-op.
 void shields_free_string(char *ptr);
 
+/// Query the runtime adblock-rust Engine for cosmetic resources (selectors,
+/// scriptlets) matching `url`. Returns a JSON-encoded `CosmeticQueryOutput`:
+///     { "hide_selectors": [...], "procedural_actions": [...],
+///       "exceptions": [...], "injected_script": "...", "generichide": false }
+/// Returns the same shape with empty arrays / empty string when the engine
+/// hasn't been initialised yet. Free the returned pointer via
+/// `shields_free_string`.
+char *shields_query_cosmetic(const char *url);
+
 #ifdef __cplusplus
 }
 #endif

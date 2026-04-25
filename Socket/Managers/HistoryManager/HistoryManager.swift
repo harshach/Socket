@@ -49,9 +49,16 @@ class HistoryManager {
         do {
             // Check if we already have this URL
             let urlString = url.absoluteString
-            // Prefer a simple fetch filtered in-memory to avoid complex SwiftData predicate issues.
-            let existingAll = try context.fetch(FetchDescriptor<HistoryEntity>())
-            let existing = existingAll.filter { $0.url == urlString }
+            // Filter at the query level — fetching all entries and filtering
+            // in memory is O(N) on every navigation and gets brutal once
+            // the user has thousands of history rows. Equality predicate is
+            // a SwiftData stable subset, so this avoids the historical issue
+            // we had with more complex predicate shapes.
+            var descriptor = FetchDescriptor<HistoryEntity>(
+                predicate: #Predicate<HistoryEntity> { $0.url == urlString }
+            )
+            descriptor.fetchLimit = 8
+            let existing = try context.fetch(descriptor)
             let targetProfileId = profileId ?? currentProfileId
             
             // Prefer same-profile entry; otherwise, only fallback to a nil-profile entry (do NOT merge across other profiles)

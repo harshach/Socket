@@ -142,6 +142,14 @@ struct SocketApp: App {
             settingsManager.blockCrossSiteTracking
         )
 
+        // Kick off WebContent process warm-up off the launch critical path
+        // so the first tab the user opens hands off an already-spawned
+        // WebContent process instead of paying the spawn cost inline.
+        DispatchQueue.main.async { [weak browserManager, weak webViewCoordinator] in
+            guard let browserManager, let webViewCoordinator else { return }
+            webViewCoordinator.prewarmIfNeeded(for: browserManager.currentProfile)
+        }
+
         // Initialize keyboard shortcut manager
         keyboardShortcutManager.setBrowserManager(browserManager)
         browserManager.keyboardShortcutManager = keyboardShortcutManager
