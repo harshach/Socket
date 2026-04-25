@@ -33,7 +33,8 @@ struct TabCompositorView: NSViewRepresentable {
         guard let currentTabId = windowState.currentTabId,
               let currentTab = browserManager.tabsForDisplay(in: windowState).first(where: { $0.id == currentTabId }),
               !currentTab.isUnloaded else {
-            if let installed = coordinator.installedWebView {
+            if let installed = coordinator.installedWebView,
+               installed.superview === containerView {
                 installed.removeFromSuperview()
             }
             coordinator.installedTabId = nil
@@ -43,25 +44,45 @@ struct TabCompositorView: NSViewRepresentable {
 
         let targetWebView = getOrCreateWebView(for: currentTab, in: windowState.id)
 
-        // Fast path: the exact same webview is already mounted for the right tab.
-        // `updateNSView` fires on any BrowserWindowState change (sidebar toggle,
-        // toolbar click, profile tick, etc.) — tearing the webview out of the view
-        // hierarchy every time forces AppKit to re-layout and WebKit to re-sync
-        // its compositing surfaces. Skip the churn unless something actually moved.
+        // Fast path: same tab + same webview already installed. `updateNSView`
+        // fires on every BrowserWindowState tick (sidebar toggle, theme flip,
+        // profile tick, etc.). We must not touch the webview's parent here:
+        // during HTML5 fullscreen WebKit hosts it in _WKFullScreenWindowController
+        // and will hand it back on its own when fullscreen exits. Calling
+        // exitFullscreen or addSubview from this path would kick the user out
+        // of fullscreen just because an unrelated state changed.
         if coordinator.installedTabId == currentTabId,
-           coordinator.installedWebView === targetWebView,
-           targetWebView.superview === containerView {
-            // Keep frame / appearance in sync in case the container resized.
-            if targetWebView.frame != containerView.bounds {
-                targetWebView.frame = containerView.bounds
+           coordinator.installedWebView === targetWebView {
+            if targetWebView.superview === containerView {
+                if targetWebView.frame != containerView.bounds {
+                    targetWebView.frame = containerView.bounds
+                }
+                targetWebView.appearance = systemContentAppearance()
             }
-            targetWebView.appearance = systemContentAppearance()
+            // If it's parented elsewhere (fullscreen), leave it alone.
             return
         }
 
-        // Different tab or different webview instance: swap.
-        if let installed = coordinator.installedWebView, installed !== targetWebView {
+        // Different tab: detach what we had. Only if it was actually parented
+        // to us — leave webviews hosted in WebKit's fullscreen window alone.
+        if let installed = coordinator.installedWebView,
+           installed !== targetWebView,
+           installed.superview === containerView {
             installed.removeFromSuperview()
+        }
+
+        // User is switching TO a tab whose webview is still parked in
+        // WebKit's fullscreen window (previously fullscreened, then
+        // navigated away, now returning). Ask the page to exit fullscreen;
+        // WebKit reparents the webview back to its original container and
+        // isInHTMLFullscreen.didSet re-enters this function with the
+        // webview cleanly in our container for the normal addSubview path.
+        if let parent = targetWebView.superview, parent !== containerView {
+            targetWebView.evaluateJavaScript(
+                "(document.exitFullscreen || document.webkitExitFullscreen)?.call(document);",
+                completionHandler: nil
+            )
+            return
         }
 
         targetWebView.frame = containerView.bounds

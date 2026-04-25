@@ -483,6 +483,25 @@ extension WebsiteShortcutDetector {
                 }, 0);
             }
             
+            // Esc releases editable focus so single-key navigation can
+            // resume on pages that auto-focus an input (Google, login
+            // forms, etc.). We run in the bubble phase and honor
+            // event.defaultPrevented so sites that handle Esc for their
+            // own purposes (closing a dropdown, cancelling IME composition)
+            // opt out simply by calling preventDefault. The focusout from
+            // blur() will reassert the editable-focus state to native.
+            document.addEventListener('keydown', (event) => {
+                if (event.key !== 'Escape' && event.keyCode !== 27) return;
+                if (event.defaultPrevented) return;
+                const active = activeEditableTarget(document);
+                if (!isEditableElement(active)) return;
+                try {
+                    if (active && typeof active.blur === 'function') {
+                        active.blur();
+                    }
+                } catch (e) { /* ignore */ }
+            }, false);
+
             // Event-driven reporting only. The previous 750ms setInterval fired
             // ~1.3 Hz per tab forever, and the listeners below already cover
             // every actual source of change (focus / keypress / selection /

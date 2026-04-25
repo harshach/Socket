@@ -3117,10 +3117,24 @@ final class ExtensionManager: NSObject, ObservableObject,
         return paths
     }
 
+    /// Cached existence checks for native-messaging manifests. `fileExists`
+    /// under `~/Library/Application Support/Google/Chrome/...` (and the other
+    /// browsers above) triggers macOS Sequoia's "access data from other apps"
+    /// TCC prompt — once per path per app version. Extensions like 1Password
+    /// send many native messages, so without this cache the prompt fires
+    /// repeatedly. Cache is process-lifetime so users see at most one set of
+    /// prompts per session per applicationId.
+    private var manifestExistsCache: [String: Bool] = [:]
+
     private func nativeMessagingManifestExists(for applicationId: String) -> Bool {
-        nativeMessagingManifestSearchPaths(for: applicationId).contains {
+        if let cached = manifestExistsCache[applicationId] {
+            return cached
+        }
+        let exists = nativeMessagingManifestSearchPaths(for: applicationId).contains {
             FileManager.default.fileExists(atPath: $0.path)
         }
+        manifestExistsCache[applicationId] = exists
+        return exists
     }
 
     private func resolvedNativeMessagingApplicationId(
@@ -3139,7 +3153,17 @@ final class ExtensionManager: NSObject, ObservableObject,
         ]
 
         if !requested.isEmpty {
-            if nativeMessagingManifestExists(for: requested) || !isOnePassword {
+            // For non-1Password extensions we always return the requested id
+            // regardless of whether the manifest exists on disk. Skipping the
+            // probe avoids the TCC prompts triggered by fileExists() against
+            // Chrome / Chromium / Edge / Brave / Mozilla NativeMessagingHosts
+            // directories — paths that macOS Sequoia gates behind the "access
+            // data from other apps" dialog.
+            if !isOnePassword {
+                return requested
+            }
+
+            if nativeMessagingManifestExists(for: requested) {
                 return requested
             }
 

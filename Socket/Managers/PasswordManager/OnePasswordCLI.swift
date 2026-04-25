@@ -62,7 +62,22 @@ final class OnePasswordCLI {
     /// Cached login list from last refresh + timestamp for TTL.
     private var cachedLogins: [OnePasswordItem] = []
     private var cachedLoginsAt: Date = .distantPast
-    private let loginCacheTTL: TimeInterval = 60
+    private let loginCacheTTL: TimeInterval = 300  // 5 minutes
+    /// Single in-flight `op item list` task. Without this, concurrent callers
+    /// (multiple password forms on a page, rapid focus events) all bypass the
+    /// cache before the first refresh stores its timestamp and each spawns a
+    /// separate `op` process — which on Sequoia fires the "access data from
+    /// other apps" TCC prompt per spawn.
+    private var inflightLoginsTask: Task<[OnePasswordItem], Never>?
+
+    /// Single in-flight `op status()` call. Same deduping reason.
+    private var inflightStatusTask: Task<Status, Never>?
+
+    /// If `op` ever fails in this session, back off for this many seconds
+    /// before probing again. Prevents the TCC prompt from re-firing every
+    /// time a form is detected when the user has already denied access.
+    private let failureBackoffInterval: TimeInterval = 300  // 5 minutes
+    private var opBackoffUntil: Date = .distantPast
 
     init() {
         self.binaryURL = Self.detectBinary()
@@ -92,8 +107,11 @@ final class OnePasswordCLI {
     }
 
     /// Re-probe the filesystem in case the user just installed the CLI.
+    /// Also clears any active failure-backoff so the Retry button in
+    /// Settings forces a fresh probe regardless of prior denials.
     func refreshBinary() {
         binaryURL = Self.detectBinary()
+        opBackoffUntil = .distantPast
     }
 
     var isInstalled: Bool { binaryURL != nil }
@@ -109,6 +127,37 @@ final class OnePasswordCLI {
                           hasAccountsConfigured: false,
                           lastError: nil)
         }
+
+        // Back off if a previous op invocation failed recently. This avoids
+        // re-triggering the Sequoia "access data from other apps" TCC prompt
+        // when the user has already dismissed it. User can break out of
+        // backoff by clicking the Retry button (which calls resetBackoff()).
+        if Date() < opBackoffUntil {
+            return Status(binaryURL: binary,
+                          signedIn: false,
+                          account: nil,
+                          email: nil,
+                          hasAccountsConfigured: false,
+                          lastError: "Probe skipped — previous invocation failed. Tap retry to probe again.")
+        }
+
+        // Dedupe concurrent status calls so multiple callers share one probe.
+        if let existing = inflightStatusTask {
+            return await existing.value
+        }
+        let task = Task<Status, Never> { [weak self] in
+            guard let self else {
+                return Status(binaryURL: binary, signedIn: false, account: nil, email: nil, hasAccountsConfigured: false, lastError: nil)
+            }
+            let result = await self.computeStatus(binary: binary)
+            self.inflightStatusTask = nil
+            return result
+        }
+        inflightStatusTask = task
+        return await task.value
+    }
+
+    private func computeStatus(binary: URL) async -> Status {
         // Try direct invocation first (fast). If that fails, retry through the
         // user's login shell so we inherit `.zshenv` / `.zprofile` exports.
         // Record both outcomes so the diagnostic panel can show the actual
@@ -118,12 +167,40 @@ final class OnePasswordCLI {
         var whoamiResult = directResult
         var shellDetail: String? = nil
 
+        // If the direct invocation looks like it was blocked by TCC, do NOT
+        // run the login-shell retry or the account-list / per-account probes.
+        // Each of those is a fresh `op` spawn and on Sequoia each spawn can
+        // fire another "access data from other apps" prompt. Arm backoff and
+        // return so the user isn't buried under prompts.
+        if case .failure(let err) = whoamiResult, Self.looksLikeTCCDenial(err) {
+            opBackoffUntil = Date().addingTimeInterval(failureBackoffInterval)
+            return Status(
+                binaryURL: binary,
+                signedIn: false,
+                account: nil,
+                email: nil,
+                hasAccountsConfigured: false,
+                lastError: "Access to 1Password data was denied by macOS. Re-enable in System Settings → Privacy & Security → App Data, then tap retry."
+            )
+        }
+
         if case .failure = whoamiResult {
             invocationMode = .loginShell
             let shellResult = await run(binary: binary, args: ["whoami", "--format=json"])
             whoamiResult = shellResult
             if case .failure(let err) = shellResult {
                 shellDetail = Self.describe(err)
+                if Self.looksLikeTCCDenial(err) {
+                    opBackoffUntil = Date().addingTimeInterval(failureBackoffInterval)
+                    return Status(
+                        binaryURL: binary,
+                        signedIn: false,
+                        account: nil,
+                        email: nil,
+                        hasAccountsConfigured: false,
+                        lastError: "Access to 1Password data was denied by macOS. Re-enable in System Settings → Privacy & Security → App Data, then tap retry."
+                    )
+                }
             }
         }
 
@@ -178,6 +255,7 @@ final class OnePasswordCLI {
         case .success(let stdout):
             let parsed = Self.parseWhoami(stdout)
             if parsed.signedIn {
+                opBackoffUntil = .distantPast  // success clears prior failure
                 return Status(binaryURL: binary,
                               signedIn: true,
                               account: parsed.account,
@@ -200,6 +278,11 @@ final class OnePasswordCLI {
         case .failure(let err):
             let primary = Self.describe(err)
             logger.notice("op whoami failed: \(primary, privacy: .public)")
+            // Block further op spawns for the backoff window. Without this
+            // every password form detection would re-invoke op and re-fire
+            // the Sequoia "access data from other apps" TCC prompt — the
+            // user ends up in an endless-popup loop.
+            opBackoffUntil = Date().addingTimeInterval(failureBackoffInterval)
             var parts: [String] = []
             parts.append("Direct invocation: \(Self.describe(Self.resultAsError(directResult)))")
             if let shellDetail { parts.append("Login-shell invocation: \(shellDetail)") }
@@ -221,6 +304,25 @@ final class OnePasswordCLI {
     private static func resultAsError(_ r: RunResult) -> CLIError {
         if case .failure(let err) = r { return err }
         return .invocationFailed(exitCode: 0, stderr: "(succeeded)")
+    }
+
+    /// Heuristic: does this CLI error smell like macOS TCC denied access
+    /// to 1Password's app data? `op` with desktop-app integration reads the
+    /// 1Password container and gets killed by sandbox / TCC — which can look
+    /// like an empty stderr + non-zero exit, or an `Operation not permitted`
+    /// message. We use this to short-circuit follow-up `op` spawns that
+    /// would each re-fire the TCC prompt.
+    private static func looksLikeTCCDenial(_ err: CLIError) -> Bool {
+        guard case .invocationFailed(let code, let stderr) = err else { return false }
+        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.contains("operation not permitted") { return true }
+        if trimmed.contains("permission denied") { return true }
+        if trimmed.contains("not authorized") { return true }
+        // SIGKILL from the sandbox shows up as a negative signal-style code.
+        // `op` itself exits with small positive codes (1, 2, ...) so a very
+        // negative / very large code with an empty stderr is suspicious.
+        if trimmed.isEmpty && code != 0 && code != 1 && code != 2 { return true }
+        return false
     }
 
     /// Human-readable one-line summary of a `CLIError`.
@@ -256,14 +358,40 @@ final class OnePasswordCLI {
 
     func logins(for host: String) async -> [OnePasswordItem] {
         let now = Date()
+
+        // Backoff: skip op entirely while we're in a cool-down window after
+        // a recent failure. Prevents the TCC prompt from re-firing on every
+        // form-detection event when the user has already denied access.
+        if now < opBackoffUntil {
+            return cachedLogins.filter { Self.matches(item: $0, host: host) }
+        }
+
         if now.timeIntervalSince(cachedLoginsAt) > loginCacheTTL {
-            cachedLogins = await refreshLogins()
-            cachedLoginsAt = now
+            // Dedupe concurrent refreshers. Without this the first caller's
+            // await on refreshLogins() lets every queued caller also see a
+            // stale cachedLoginsAt, each spawning its own op — which on
+            // Sequoia fires a fresh TCC prompt per spawn.
+            let task: Task<[OnePasswordItem], Never>
+            if let existing = inflightLoginsTask {
+                task = existing
+            } else {
+                let newTask = Task<[OnePasswordItem], Never> { [weak self] in
+                    guard let self else { return [] }
+                    return await self.refreshLogins()
+                }
+                inflightLoginsTask = newTask
+                task = newTask
+            }
+            cachedLogins = await task.value
+            cachedLoginsAt = Date()
+            inflightLoginsTask = nil
         }
+        return cachedLogins.filter { Self.matches(item: $0, host: host) }
+    }
+
+    private static func matches(item: OnePasswordItem, host: String) -> Bool {
         let needle = host.lowercased()
-        return cachedLogins.filter { item in
-            item.urls.contains(where: { Self.matchesHost($0, host: needle) })
-        }
+        return item.urls.contains(where: { Self.matchesHost($0, host: needle) })
     }
 
     /// Exposed for unit tests. `needle` must already be lowercased.
@@ -290,9 +418,13 @@ final class OnePasswordCLI {
                                                  "--categories=Login",
                                                  "--format=json"]) {
         case .success(let stdout):
+            opBackoffUntil = .distantPast  // success clears prior failure
             return Self.parseLoginList(stdout)
         case .failure(let err):
             logger.error("op item list failed: \(String(describing: err), privacy: .public)")
+            // Arm backoff so subsequent form detections / autofill requests
+            // don't each respawn op and re-prompt the user for TCC access.
+            opBackoffUntil = Date().addingTimeInterval(failureBackoffInterval)
             return []
         }
     }
