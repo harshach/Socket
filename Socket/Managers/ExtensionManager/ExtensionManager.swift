@@ -3154,7 +3154,17 @@ final class ExtensionManager: NSObject, ObservableObject,
         ]
 
         if !requested.isEmpty {
-            if nativeMessagingManifestExists(for: requested) || !isOnePassword {
+            // For non-1Password extensions we always return the requested id
+            // regardless of whether the manifest exists on disk. Skipping the
+            // probe avoids the TCC prompts triggered by fileExists() against
+            // Chrome / Chromium / Edge / Brave / Mozilla NativeMessagingHosts
+            // directories — paths that macOS Sequoia gates behind the "access
+            // data from other apps" dialog.
+            if !isOnePassword {
+                return requested
+            }
+
+            if nativeMessagingManifestExists(for: requested) {
                 return requested
             }
 

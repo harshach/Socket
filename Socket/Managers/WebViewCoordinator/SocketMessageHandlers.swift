@@ -25,6 +25,7 @@ enum SocketMessageHandlers {
         "commandHover",
         "commandClick",
         "pipStateChange",
+        "fullscreenStateChange",
         "historyStateDidChange",
         "SocketIdentity",
         "socketShortcutDetect",

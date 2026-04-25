@@ -234,6 +234,20 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     @Published var hasPlayingVideo: Bool = false
     @Published var hasVideoContent: Bool = false  // Track if tab has any video content
     @Published var hasPiPActive: Bool = false
+    @Published var isInHTMLFullscreen: Bool = false {
+        didSet {
+            guard oldValue != isInHTMLFullscreen else { return }
+            // When HTML5 fullscreen exits, WebKit reparents the webview back
+            // to its original container. Kick every window's compositor so a
+            // tab that was switched away from during fullscreen re-mounts
+            // cleanly instead of sitting dark until toggled again.
+            if !isInHTMLFullscreen {
+                browserManager?.windowRegistry?.windows.values.forEach { window in
+                    browserManager?.refreshCompositor(for: window)
+                }
+            }
+        }
+    }
 
     // MARK: - Audio State
     @Published var hasPlayingAudio: Bool = false
@@ -1020,6 +1034,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         hasAudioContent = false
         isAudioMuted = false
         hasPiPActive = false
+        isInHTMLFullscreen = false
         loadingState = .idle
 
         // 13. CLEANUP ZOOM DATA
@@ -1272,22 +1287,35 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         }
     }
 
-    private func injectMediaDetection(to webView: WKWebView) {
-        let mediaDetectionScript = """
+    static func mediaDetectionScript(handlerSuffix: String) -> String {
+        return """
             (function() {
-                const handlerName = 'mediaStateChange_\(id.uuidString)';
+                const handlerName = 'mediaStateChange_\(handlerSuffix)';
+
+                // Coalesce media-state checks so bursts of listeners firing in
+                // quick succession (e.g. duplicate DOM observers after SPA nav)
+                // collapse into one querySelectorAll + postMessage round-trip.
+                let mediaCheckPending = false;
+                function scheduleMediaCheck(delay) {
+                    if (mediaCheckPending) return;
+                    mediaCheckPending = true;
+                    setTimeout(() => {
+                        mediaCheckPending = false;
+                        checkMediaState();
+                    }, delay);
+                }
 
                 // Track current URL for navigation detection
                 window.__SocketCurrentURL = window.location.href;
 
                 function resetSoundTracking() {
-                    window.webkit.messageHandlers[handlerName].postMessage({
-                        hasAudioContent: false,
-                        hasPlayingAudio: false,
-                        hasVideoContent: false,
-                        hasPlayingVideo: false
-                    });
-                    setTimeout(checkMediaState, 100);
+                    // Do not force-post {all: false} here. Toggling hasAudioContent
+                    // false→true (100ms later) re-enters Tab.hasAudioContent.didSet,
+                    // which tears down and rebuilds the Core Audio listener + 1s
+                    // Timer on the main actor — right as the new video's audio
+                    // decoder is initializing. A single delayed check lets the
+                    // next state update land organically from the real events.
+                    scheduleMediaCheck(300);
                 }
 
                 const originalPushState = history.pushState;
@@ -1445,22 +1473,25 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                 }
 
                 function addAudioListeners(element) {
-                    ['play', 'pause', 'ended', 'loadedmetadata', 'canplay', 'volumechange', 'timeupdate'].forEach(event => {
+                    // Do not add 'timeupdate': it fires 4-60Hz during playback with
+                    // no state-change signal, and the 5s interval below already
+                    // covers DRM byte-count / currentTime progression polling.
+                    ['play', 'pause', 'ended', 'loadedmetadata', 'canplay', 'volumechange'].forEach(event => {
                         element.addEventListener(event, function() {
-                            setTimeout(checkMediaState, 50);
+                            scheduleMediaCheck(50);
                         });
                     });
 
                     try {
                         if ('webkitneedkey' in element) {
                             element.addEventListener('webkitneedkey', function() {
-                                setTimeout(checkMediaState, 100);
+                                scheduleMediaCheck(100);
                             });
                         }
 
                         if ('encrypted' in element) {
                             element.addEventListener('encrypted', function() {
-                                setTimeout(checkMediaState, 100);
+                                scheduleMediaCheck(100);
                             });
                         }
                     } catch (e) {}
@@ -1497,7 +1528,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                     });
 
                     if (hasChanges) {
-                        setTimeout(checkMediaState, 100);
+                        scheduleMediaCheck(100);
                     }
                 });
                 mediaObserver.observe(document.body, { childList: true, subtree: true });
@@ -1507,7 +1538,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
 
                     if (hostname.includes('spotify.com')) {
                         const observer = new MutationObserver(() => {
-                            setTimeout(checkMediaState, 100);
+                            scheduleMediaCheck(100);
                         });
 
                         const playerArea = document.querySelector('[data-testid="now-playing-widget"]') || document.body;
@@ -1521,11 +1552,11 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                         }
                     } else if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
                         window.addEventListener('yt-navigate-finish', () => {
-                            setTimeout(checkMediaState, 500);
+                            scheduleMediaCheck(500);
                         });
 
                         const observer = new MutationObserver(() => {
-                            setTimeout(checkMediaState, 100);
+                            scheduleMediaCheck(100);
                         });
 
                         const playerElement = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
@@ -1537,7 +1568,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                         }
                     } else if (hostname.includes('soundcloud.com')) {
                         const observer = new MutationObserver(() => {
-                            setTimeout(checkMediaState, 100);
+                            scheduleMediaCheck(100);
                         });
 
                         const playerElement = document.querySelector('.playControls') || document.body;
@@ -1549,7 +1580,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                         });
                     } else if (hostname.includes('music.apple.com')) {
                         const observer = new MutationObserver(() => {
-                            setTimeout(checkMediaState, 100);
+                            scheduleMediaCheck(100);
                         });
 
                         const playerElement = document.querySelector('.web-chrome-playback-controls') || document.body;
@@ -1562,14 +1593,21 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                     }
                 }
 
-                setTimeout(setupStreamingSiteMonitoring, 1000);
-                setTimeout(checkMediaState, 500);
+                // Defer initial setup past the audio-decoder startup window
+                // (WebKit's first audio-buffer fill happens ~0-1s after play).
+                // Kicking off DOM scans inside that window correlates with a
+                // brief mute/crackle at the start of every video.
+                setTimeout(setupStreamingSiteMonitoring, 2500);
+                scheduleMediaCheck(2000);
                 setInterval(() => {
                     checkMediaState();
                 }, 5000);
             })();
             """
+    }
 
+    private func injectMediaDetection(to webView: WKWebView) {
+        let mediaDetectionScript = Self.mediaDetectionScript(handlerSuffix: id.uuidString)
         webView.evaluateJavaScript(mediaDetectionScript) { result, error in
             if let error = error {
                 print("[Media Detection] Error: \(error.localizedDescription)")
@@ -2539,7 +2577,35 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             }
         }
     }
-    
+
+    private func injectFullscreenStateListener(to webView: WKWebView) {
+        // Tracks HTML5 Fullscreen API state (element.requestFullscreen / Esc /
+        // programmatic exit). We need this so TabCompositorView can avoid
+        // stealing the webview out of WebKit's _WKFullScreenWindowController
+        // while it's hosted there — mid-state reparenting leaves the layer
+        // tree broken and the tab renders dark until fullscreen is toggled
+        // off and on.
+        let script = """
+            (function() {
+                if (window.__SocketFullscreenListenerInstalled) return;
+                window.__SocketFullscreenListenerInstalled = true;
+                function notify() {
+                    const el = document.fullscreenElement || document.webkitFullscreenElement;
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.fullscreenStateChange) {
+                        window.webkit.messageHandlers.fullscreenStateChange.postMessage({ active: !!el });
+                    }
+                }
+                document.addEventListener('fullscreenchange', notify);
+                document.addEventListener('webkitfullscreenchange', notify);
+            })();
+            """
+        webView.evaluateJavaScript(script) { _, error in
+            if let error = error {
+                print("[Fullscreen] State listener injection failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func injectShortcutDetection(to webView: WKWebView) {
         // Inject the JS script from WebsiteShortcutDetector for runtime shortcut detection
         let script = WebsiteShortcutDetector.jsDetectionScript
@@ -2929,6 +2995,7 @@ extension Tab: WKNavigationDelegate {
 
         injectLinkHoverJavaScript(to: webView)
         injectPiPStateListener(to: webView)
+        injectFullscreenStateListener(to: webView)
         injectMediaDetection(to: webView)
         injectHistoryStateObserver(into: webView)
         // Shortcut detection is already attached as a documentEnd userScript
@@ -3345,6 +3412,13 @@ extension Tab: WKScriptMessageHandler {
                 DispatchQueue.main.async {
                     print("[PiP] State change detected from web: \(active)")
                     self.hasPiPActive = active
+                }
+            }
+
+        case "fullscreenStateChange":
+            if let dict = message.body as? [String: Any], let active = dict["active"] as? Bool {
+                DispatchQueue.main.async {
+                    self.isInHTMLFullscreen = active
                 }
             }
 
