@@ -32,6 +32,20 @@ final class ExtensionManager: NSObject, ObservableObject,
     private var extensionContexts: [String: WKWebExtensionContext] = [:]
     private var actionAnchors: [String: [WeakAnchor]] = [:]
     private var shimUserScriptsInstalled = false
+
+    /// FIFO cache of URLs we've already granted permission to all current
+    /// extension contexts (see `grantExtensionAccessToURL`). Keeps the cost
+    /// of repeat-navigation to a known URL near zero.
+    private var grantedURLs: Set<URL> = []
+    private var grantedURLOrder: [URL] = []
+    private let grantedURLLimit = 200
+
+    /// FIFO cache of URL → extension ids whose match patterns cover the URL.
+    /// Used by `warmBackgroundIfNeeded` to skip per-extension pattern
+    /// matching on subsequent navigations.
+    private var warmMatchCache: [URL: [String]] = [:]
+    private var warmMatchCacheOrder: [URL] = []
+    private let warmMatchCacheLimit = 200
     /// MEMORY LEAK FIX: Store observer tokens so they can be removed when anchors change
     private var anchorObserverTokens: [String: [Any]] = [:]
     // Keep options windows alive per extension id, with a paired
@@ -226,7 +240,11 @@ final class ExtensionManager: NSObject, ObservableObject,
         Self.logger.info("Native WKWebExtensionController initialized and configured")
 
         registerShimsIfNeeded()
-        installShimUserScriptsIfNeeded()
+        // Shim user scripts are deferred until at least one extension is
+        // present (see installShimUserScriptsIfNeeded callers in
+        // loadInstalledExtensions and the install-success path). On a clean
+        // profile with no extensions, we save parsing the ~450-line shim
+        // bundle on every page navigation.
     }
 
     // MARK: - Chrome.* Shim Layer
@@ -1867,6 +1885,15 @@ final class ExtensionManager: NSObject, ObservableObject,
                 )
                 await MainActor.run {
                     self.installedExtensions.append(installedExtension)
+                    // First-extension install: lazily attach the shim user
+                    // scripts now (idempotent — subsequent installs no-op).
+                    self.installShimUserScriptsIfNeeded()
+                    // The set of extensions changed — drop the per-URL
+                    // grant + warm caches so the new extension is honored
+                    // on the next navigation.
+                    if #available(macOS 15.4, *) {
+                        self.invalidateExtensionURLCaches()
+                    }
                     ExtensionTelemetry.shared.record(
                         .installSucceeded,
                         extensionId: installedExtension.id,
@@ -2578,6 +2605,9 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         // 6. Drop the runtime model.
         installedExtensions.removeAll { $0.id == extensionId }
+        if #available(macOS 15.4, *) {
+            invalidateExtensionURLCaches()
+        }
 
         ExtensionTelemetry.shared.record(.uninstallSucceeded,
                                         extensionId: extensionId,
@@ -2930,6 +2960,13 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         self.installedExtensions = loadedExtensions
 
+        // Now that we know whether any extensions exist on disk, install
+        // the chrome.* / browser.* shim user scripts. Skipping this when no
+        // extensions are present keeps the shim bundle off every page.
+        if !loadedExtensions.isEmpty {
+            installShimUserScriptsIfNeeded()
+        }
+
         // No enabled extensions — mark loaded immediately
         if enabledEntities.isEmpty {
             Self.logger.info("No enabled extensions to load")
@@ -3097,44 +3134,8 @@ final class ExtensionManager: NSObject, ObservableObject,
         extensionUIWebViews.allObjects.contains { $0 === webView }
     }
 
-    private func nativeMessagingManifestSearchPaths(for applicationId: String) -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let manifestName = "\(applicationId).json"
-        let browserDirs = [
-            "Library/Application Support/Socket/NativeMessagingHosts",
-            "Library/Application Support/Google/Chrome/NativeMessagingHosts",
-            "Library/Application Support/Chromium/NativeMessagingHosts",
-            "Library/Application Support/Microsoft Edge/NativeMessagingHosts",
-            "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts",
-            "Library/Application Support/Mozilla/NativeMessagingHosts",
-        ]
-
-        var paths: [URL] = []
-        for dir in browserDirs {
-            paths.append(home.appendingPathComponent(dir).appendingPathComponent(manifestName))
-            paths.append(URL(fileURLWithPath: "/\(dir)").appendingPathComponent(manifestName))
-        }
-        return paths
-    }
-
-    /// Cached existence checks for native-messaging manifests. `fileExists`
-    /// under `~/Library/Application Support/Google/Chrome/...` (and the other
-    /// browsers above) triggers macOS Sequoia's "access data from other apps"
-    /// TCC prompt — once per path per app version. Extensions like 1Password
-    /// send many native messages, so without this cache the prompt fires
-    /// repeatedly. Cache is process-lifetime so users see at most one set of
-    /// prompts per session per applicationId.
-    private var manifestExistsCache: [String: Bool] = [:]
-
     private func nativeMessagingManifestExists(for applicationId: String) -> Bool {
-        if let cached = manifestExistsCache[applicationId] {
-            return cached
-        }
-        let exists = nativeMessagingManifestSearchPaths(for: applicationId).contains {
-            FileManager.default.fileExists(atPath: $0.path)
-        }
-        manifestExistsCache[applicationId] = exists
-        return exists
+        NativeMessagingManifestResolver.shared.manifestURL(for: applicationId) != nil
     }
 
     private func resolvedNativeMessagingApplicationId(
@@ -3285,8 +3286,18 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// scripts won't inject and messaging fails. Call before navigation starts.
     @available(macOS 15.4, *)
     func grantExtensionAccessToURL(_ url: URL) {
+        // Skip the per-extension setter loop on URLs we've already granted
+        // for the current set of installed extensions. The cache is reset on
+        // any install/remove via `invalidateExtensionURLCaches()`.
+        if grantedURLs.contains(url) { return }
         for (_, ctx) in extensionContexts {
             ctx.setPermissionStatus(.grantedExplicitly, for: url)
+        }
+        grantedURLs.insert(url)
+        grantedURLOrder.append(url)
+        if grantedURLOrder.count > grantedURLLimit {
+            let evict = grantedURLOrder.removeFirst()
+            grantedURLs.remove(evict)
         }
     }
 
@@ -3296,18 +3307,45 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// waking before navigation avoids dropped first messages.
     @available(macOS 15.5, *)
     func warmBackgroundIfNeeded(for url: URL) {
-        for (_, ctx) in extensionContexts {
+        // Cache (url -> matched extension ids) so subsequent navigations to
+        // the same URL skip the per-extension pattern-matching loop. Cache
+        // is invalidated on extension install/remove.
+        if let cached = warmMatchCache[url] {
+            for id in cached {
+                guard let ctx = extensionContexts[id] else { continue }
+                ctx.loadBackgroundContent { _ in /* best effort */ }
+            }
+            return
+        }
+
+        var matched: [String] = []
+        for (id, ctx) in extensionContexts {
             guard ctx.webExtension.hasBackgroundContent else { continue }
-            // Cheap heuristic: only wake when any requested match pattern
-            // matches this URL. Avoids waking every background on every
-            // navigation.
             let patterns = ctx.webExtension.allRequestedMatchPatterns
             let matches = patterns.contains { pattern in
                 pattern.matches(url, options: [])
             }
             guard matches else { continue }
+            matched.append(id)
             ctx.loadBackgroundContent { _ in /* best effort */ }
         }
+        warmMatchCache[url] = matched
+        warmMatchCacheOrder.append(url)
+        if warmMatchCacheOrder.count > warmMatchCacheLimit {
+            let evict = warmMatchCacheOrder.removeFirst()
+            warmMatchCache.removeValue(forKey: evict)
+        }
+    }
+
+    /// Reset the per-URL grant + warm caches. Call from any code path that
+    /// changes the set of installed extensions (install, uninstall, enable,
+    /// disable) so a freshly-installed extension actually sees the next
+    /// navigation through the warm/grant calls.
+    fileprivate func invalidateExtensionURLCaches() {
+        grantedURLs.removeAll()
+        grantedURLOrder.removeAll()
+        warmMatchCache.removeAll()
+        warmMatchCacheOrder.removeAll()
     }
 
     @available(macOS 15.4, *)
@@ -4929,11 +4967,76 @@ final class WeakAnchor {
     }
 }
 
+// MARK: - Native Messaging Manifest Resolver
+
+/// Process-lifetime cache for native-messaging manifest paths.
+///
+/// Each lookup walks Socket's own manifest directory plus Chrome / Chromium /
+/// Edge / Brave / Mozilla equivalents at user and system level — twelve paths
+/// per applicationId. Sonoma's App Management TCC re-prompts ("Socket would
+/// like to access data from other apps.") every time we touch one of those
+/// other-app folders, and password-manager extensions (1Password, Bitwarden)
+/// push native messages constantly — once per password field, often per tab.
+/// Caching the resolved URL turns a repeated multi-prompt experience into one
+/// scan per applicationId per launch.
+@available(macOS 15.4, *)
+private final class NativeMessagingManifestResolver: @unchecked Sendable {
+    static let shared = NativeMessagingManifestResolver()
+    private let lock = NSLock()
+    private var resolved: [String: URL?] = [:]
+
+    /// Returns the on-disk manifest URL for `applicationId`, or nil if none
+    /// of the candidate paths exist. Result is memoised for the process
+    /// lifetime; callers that need to pick up a freshly-installed host should
+    /// call `invalidate(applicationId:)` first.
+    func manifestURL(for applicationId: String) -> URL? {
+        lock.lock()
+        if let cached = resolved[applicationId] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let url = Self.scan(applicationId: applicationId)
+
+        lock.lock()
+        resolved[applicationId] = url
+        lock.unlock()
+
+        return url
+    }
+
+    func invalidate(applicationId: String) {
+        lock.lock()
+        resolved.removeValue(forKey: applicationId)
+        lock.unlock()
+    }
+
+    private static func scan(applicationId: String) -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let manifestName = "\(applicationId).json"
+        let browserDirs = [
+            "Library/Application Support/Socket/NativeMessagingHosts",
+            "Library/Application Support/Google/Chrome/NativeMessagingHosts",
+            "Library/Application Support/Chromium/NativeMessagingHosts",
+            "Library/Application Support/Microsoft Edge/NativeMessagingHosts",
+            "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+            "Library/Application Support/Mozilla/NativeMessagingHosts",
+        ]
+        let fm = FileManager.default
+        for dir in browserDirs {
+            let user = home.appendingPathComponent(dir).appendingPathComponent(manifestName)
+            if fm.fileExists(atPath: user.path) { return user }
+            let system = URL(fileURLWithPath: "/\(dir)").appendingPathComponent(manifestName)
+            if fm.fileExists(atPath: system.path) { return system }
+        }
+        return nil
+    }
+}
+
 // MARK: - Native Messaging Handler
 
 @available(macOS 15.4, *)
-// MARK: - Native Messaging Handler
-
 class NativeMessagingHandler: NSObject {
     private static let logger = Logger(subsystem: "com.socket.browser", category: "NativeMessaging")
     let applicationId: String
@@ -5069,103 +5172,87 @@ class NativeMessagingHandler: NSObject {
         // Let's try to look in standard paths.
         
         DispatchQueue.global(qos: .userInitiated).async {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            let manifestName = "\(self.applicationId).json"
-            let browserDirs = [
-                // Socket-specific (highest priority)
-                "Library/Application Support/Socket/NativeMessagingHosts",
-                // Chrome
-                "Library/Application Support/Google/Chrome/NativeMessagingHosts",
-                // Chromium
-                "Library/Application Support/Chromium/NativeMessagingHosts",
-                // Microsoft Edge
-                "Library/Application Support/Microsoft Edge/NativeMessagingHosts",
-                // Brave
-                "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts",
-                // Firefox / Mozilla
-                "Library/Application Support/Mozilla/NativeMessagingHosts",
-            ]
-            var paths: [URL] = []
-            for dir in browserDirs {
-                // User-level
-                paths.append(home.appendingPathComponent(dir).appendingPathComponent(manifestName))
-                // System-level
-                paths.append(URL(fileURLWithPath: "/\(dir)").appendingPathComponent(manifestName))
+            // Use the shared resolver so we don't re-walk Chrome/Chromium/Edge/
+            // Brave/Mozilla manifest dirs on every connection — that re-walk
+            // was the source of repeated Sonoma App Management TCC prompts on
+            // password-manager-heavy pages.
+            guard let path = NativeMessagingManifestResolver.shared.manifestURL(for: self.applicationId) else {
+                Self.logger.info("No native messaging manifest found for \(self.applicationId, privacy: .public)")
+                completion(false)
+                return
             }
-            
-            for path in paths {
-                if let data = try? Data(contentsOf: path),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let binaryPath = json["path"] as? String {
 
-                    Self.logger.info("Found manifest at \(path.path)")
+            guard let data = try? Data(contentsOf: path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let binaryPath = json["path"] as? String else {
+                Self.logger.error("Manifest at \(path.path, privacy: .public) is malformed for \(self.applicationId, privacy: .public)")
+                completion(false)
+                return
+            }
 
-                    // Launch it
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: binaryPath)
+            Self.logger.info("Found manifest at \(path.path)")
 
-                    // Per Chrome's native-messaging spec, the host binary is
-                    // launched with two arguments:
-                    //   argv[1] = origin URL of the calling extension,
-                    //              e.g. `chrome-extension://<id>/`
-                    //   argv[2] = parent window handle (an integer; macOS
-                    //              hosts ignore it, so "0" is fine)
-                    //
-                    // Hosts like 1Password / Bitwarden / Dashlane gate access
-                    // by checking argv[1] against a whitelist in their
-                    // manifest's `allowed_origins`. WKWebExtension's per-app
-                    // UUID won't be in those lists, so when our origin isn't
-                    // accepted we fall back to the first entry from the
-                    // manifest's `allowed_origins`. This matches what every
-                    // other Chromium-derivative does (Brave, Edge, etc.) and
-                    // is what makes 1Password's popup actually load.
-                    let ourOrigin = "chrome-extension://\(self.extensionId)/"
-                    let allowedOrigins = (json["allowed_origins"] as? [String]) ?? []
-                    let originToUse: String
-                    if allowedOrigins.isEmpty || allowedOrigins.contains(ourOrigin) {
-                        originToUse = ourOrigin
-                    } else if let firstAllowed = allowedOrigins.first {
-                        originToUse = firstAllowed
-                        Self.logger.info("Using whitelisted origin \(firstAllowed, privacy: .public) instead of \(ourOrigin, privacy: .public) for host \(self.applicationId, privacy: .public)")
-                    } else {
-                        originToUse = ourOrigin
-                    }
-                    process.arguments = [originToUse, "0"]
-                    
-                    let input = Pipe()
-                    let output = Pipe()
-                    let error = Pipe()
-                    
-                    process.standardInput = input
-                    process.standardOutput = output
-                    process.standardError = error
-                    
-                    self.inputPipe = input
-                    self.outputPipe = output
-                    self.errorPipe = error
-                    self.process = process
-                    
-                    // Handle stdout (messages from host)
-                    output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                        let data = handle.availableData
-                        if !data.isEmpty {
-                            self?.handleOutput(data)
-                        }
-                    }
-                    
-                    do {
-                        try process.run()
-                        Self.logger.debug("   🚀 Process launched!")
-                        completion(true)
-                        return
-                    } catch {
-                        Self.logger.error("Failed to launch process: \(error)")
-                    }
+            // Launch it
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binaryPath)
+
+            // Per Chrome's native-messaging spec, the host binary is
+            // launched with two arguments:
+            //   argv[1] = origin URL of the calling extension,
+            //              e.g. `chrome-extension://<id>/`
+            //   argv[2] = parent window handle (an integer; macOS
+            //              hosts ignore it, so "0" is fine)
+            //
+            // Hosts like 1Password / Bitwarden / Dashlane gate access
+            // by checking argv[1] against a whitelist in their
+            // manifest's `allowed_origins`. WKWebExtension's per-app
+            // UUID won't be in those lists, so when our origin isn't
+            // accepted we fall back to the first entry from the
+            // manifest's `allowed_origins`. This matches what every
+            // other Chromium-derivative does (Brave, Edge, etc.) and
+            // is what makes 1Password's popup actually load.
+            let ourOrigin = "chrome-extension://\(self.extensionId)/"
+            let allowedOrigins = (json["allowed_origins"] as? [String]) ?? []
+            let originToUse: String
+            if allowedOrigins.isEmpty || allowedOrigins.contains(ourOrigin) {
+                originToUse = ourOrigin
+            } else if let firstAllowed = allowedOrigins.first {
+                originToUse = firstAllowed
+                Self.logger.info("Using whitelisted origin \(firstAllowed, privacy: .public) instead of \(ourOrigin, privacy: .public) for host \(self.applicationId, privacy: .public)")
+            } else {
+                originToUse = ourOrigin
+            }
+            process.arguments = [originToUse, "0"]
+
+            let input = Pipe()
+            let output = Pipe()
+            let error = Pipe()
+
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = error
+
+            self.inputPipe = input
+            self.outputPipe = output
+            self.errorPipe = error
+            self.process = process
+
+            // Handle stdout (messages from host)
+            output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                if !data.isEmpty {
+                    self?.handleOutput(data)
                 }
             }
-            
-            Self.logger.debug("   ⚠️ No manifest found for \(self.applicationId)")
-            completion(false)
+
+            do {
+                try process.run()
+                Self.logger.debug("   🚀 Process launched!")
+                completion(true)
+            } catch {
+                Self.logger.error("Failed to launch process: \(error)")
+                completion(false)
+            }
         }
     }
     
